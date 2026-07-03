@@ -59,7 +59,10 @@ mod imp {
                 "dir=out",
                 "action=block",
                 "protocol=TCP",
-                &format!("localport={port}"),
+                // "remoteport" is the destination port for an outbound
+                // rule; "localport" would match the client's ephemeral
+                // source port instead and never block anything.
+                &format!("remoteport={port}"),
             ])
             .status()?;
         if !status.success() {
