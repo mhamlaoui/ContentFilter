@@ -7,14 +7,14 @@ name = "cf-core"
 version = "0.1.0"
 
 [[package]]
-name = "cf-guardian"
+name = "cf-custom-actions"
 version = "0.1.0"
 dependencies = [
  "cf-core",
 ]
 
 [[package]]
-name = "cf-installer-custom-actions"
+name = "cf-guardian"
 version = "0.1.0"
 dependencies = [
  "cf-core",
@@ -40,6 +40,10 @@ version = "0.1.0"
 dependencies = [
  "cf-core",
 ]
+
+[[package]]
+name = "cf-test-harness"
+version = "0.1.0"
 
 [[package]]
 name = "cf-tray"

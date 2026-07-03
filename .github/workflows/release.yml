@@ -1,0 +1,110 @@
+name: Release
+
+# Builds every tagged release twice, from two independent checkouts, and
+# fails if the resulting binaries don't hash-match byte-for-byte. This makes
+# f-repro-builds' "two independent builds produce identical hashes" DoD
+# self-verifying instead of a documentation claim. See
+# docs/REPRODUCIBLE_BUILDS.md for how the determinism is achieved and how a
+# third party can repeat this verification themselves.
+#
+# Releases are drafted unsigned: the release key is kept offline per
+# docs/KEY_CEREMONY.md and must never be available to CI, so a maintainer
+# has to download SHA256SUMS, sign it offline, attach SHA256SUMS.sig, and
+# publish the draft manually.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  reproducible-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: build-a
+      - uses: actions/checkout@v4
+        with:
+          path: build-b
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build A
+        shell: bash
+        working-directory: build-a
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export RUSTFLAGS="-C link-arg=/Brepro --remap-path-prefix=$(pwd -W)=/build"
+          else
+            export RUSTFLAGS="-C link-arg=-Wl,--build-id=sha1 --remap-path-prefix=$(pwd)=/build"
+          fi
+          cargo build --workspace --release --locked
+
+      - name: Build B
+        shell: bash
+        working-directory: build-b
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            export RUSTFLAGS="-C link-arg=/Brepro --remap-path-prefix=$(pwd -W)=/build"
+          else
+            export RUSTFLAGS="-C link-arg=-Wl,--build-id=sha1 --remap-path-prefix=$(pwd)=/build"
+          fi
+          cargo build --workspace --release --locked
+
+      - name: Compare hashes and collect artifacts
+        shell: bash
+        run: |
+          select_artifacts() {
+            find . -maxdepth 1 -type f \( -name 'cf-*' -o -name 'cf_*' \) \
+              ! -name '*.d' ! -name '*.pdb' ! -name '*.exp' ! -name '*.lib' ! -name '*.rlib' \
+              | sort
+          }
+          mkdir -p out
+          (cd build-a/target/release && select_artifacts | xargs sha256sum) > out/a.sha256
+          (cd build-b/target/release && select_artifacts | xargs sha256sum) > out/b.sha256
+          if ! diff <(cut -d' ' -f1 out/a.sha256) <(cut -d' ' -f1 out/b.sha256); then
+            echo "::error::build is not reproducible on ${{ matrix.os }} — hashes differ between two independent checkouts"
+            exit 1
+          fi
+          echo "reproducible: ${{ matrix.os }} hashes match across two independent builds"
+          mkdir -p "release-assets/${{ matrix.os }}"
+          (cd build-a/target/release && select_artifacts | xargs -I{} cp {} "$GITHUB_WORKSPACE/release-assets/${{ matrix.os }}/")
+          cp out/a.sha256 "release-assets/${{ matrix.os }}/SHA256SUMS-${{ matrix.os }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.os }}
+          path: release-assets/${{ matrix.os }}
+
+  draft-release:
+    needs: reproducible-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          path: assets
+          merge-multiple: false
+
+      - name: Combine checksums and draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          find assets -type f -name 'SHA256SUMS-*.txt' -exec cat {} + > SHA256SUMS
+          files=$(find assets -type f ! -name 'SHA256SUMS-*.txt')
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --title "${{ github.ref_name }}" \
+            --notes "Unsigned draft. Verified reproducible across two independent checkouts on Windows and Linux (see the reproducible-build job). Before publishing: download SHA256SUMS, sign it offline per docs/KEY_CEREMONY.md, attach SHA256SUMS.sig, then publish this draft." \
+            SHA256SUMS $files

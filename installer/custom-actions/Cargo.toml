@@ -1,12 +1,18 @@
 [package]
-name = "cf-installer-custom-actions"
+name = "cf-custom-actions"
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
 publish.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+# A cdylib-derived test harness binary trips Windows Application Control /
+# installer-detection heuristics on some machines (unsigned PE with DLL
+# export characteristics). Nothing here is unit-tested yet; revisit by
+# moving real logic into an rlib-only helper crate once inst-custom-actions
+# has actual behavior to test.
+test = false
 
 [lints]
 workspace = true

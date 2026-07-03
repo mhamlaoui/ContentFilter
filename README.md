@@ -7,6 +7,9 @@ Three files:
 | `create_backlog.sh` | Idempotent Bash script that creates the GitHub **Project**, labels, milestones, and **90 issues** (13 epics + 77 tasks) with dependencies and validation criteria, in your existing repo. |
 | `BACKLOG.md` | Human-readable plan: every ticket, its blockers, its Definition of Done, a build-order (dependency waves), and a Mermaid epic graph. Read this first. |
 | `README.md` | You are here. |
+| `THREAT_MODEL.md` | Living threat model: every defended threat mapped to its control and test, plus explicit residual risks. |
+| `docs/KEY_CEREMONY.md` | Offline release-key generation and rotation runbook. |
+| `docs/REPRODUCIBLE_BUILDS.md` | How and why release builds are byte-for-byte reproducible, and how to verify one yourself. |
 
 The script targets the **existing** `contentfilter` repository — it does **not** create a repo. It creates a new **Project (v2)** board and files the issues into it.
 
