@@ -1,5 +1,7 @@
 use cf_test_harness::dns::{assert_resolves, assert_sinkholed, DnsFixture, Outcome};
-use cf_test_harness::egress::{assert_egress_allowed, assert_egress_denied, block_outbound_tcp};
+use cf_test_harness::egress::{
+    assert_egress_allowed, assert_egress_denied, block_outbound_tcp, local_nonloopback_ip,
+};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener};
 
@@ -28,7 +30,8 @@ fn egress_port_is_denied_once_blocked() {
         return;
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind egress-target listener");
+    let ip = local_nonloopback_ip().expect("discover a non-loopback local ip");
+    let listener = TcpListener::bind((ip, 0)).expect("bind egress-target listener");
     let addr = listener.local_addr().unwrap();
 
     assert_egress_allowed(addr);

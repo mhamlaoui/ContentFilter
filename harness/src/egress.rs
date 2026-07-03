@@ -6,8 +6,23 @@
 //! outside CI (no `CI` env var) to avoid touching a developer's machine.
 
 use std::io;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
+
+/// Returns a real, non-loopback local IP by asking the OS which interface
+/// it would route through to reach an arbitrary external address (no
+/// packets are actually sent — UDP `connect` just does a routing lookup).
+///
+/// Firewall rules matched against 127.0.0.1 are unreliable to test against:
+/// self-connections over the loopback interface bypass outbound filtering
+/// on at least some Windows configurations, observed empirically in CI
+/// (a `remoteport`-correct block rule had no effect on a 127.0.0.1
+/// connection). Binding on a real interface address avoids that.
+pub fn local_nonloopback_ip() -> io::Result<IpAddr> {
+    let probe = UdpSocket::bind("0.0.0.0:0")?;
+    probe.connect("8.8.8.8:80")?;
+    Ok(probe.local_addr()?.ip())
+}
 
 pub struct BlockGuard {
     #[cfg(windows)]
@@ -16,8 +31,8 @@ pub struct BlockGuard {
     port: u16,
 }
 
-/// Blocks outbound TCP to `port` on loopback until the returned guard drops.
-/// Returns an error if not running in CI (`CI` env var unset).
+/// Blocks outbound TCP to `port` until the returned guard drops. Returns an
+/// error if not running in CI (`CI` env var unset).
 pub fn block_outbound_tcp(port: u16) -> io::Result<BlockGuard> {
     if std::env::var_os("CI").is_none() {
         return Err(io::Error::new(
