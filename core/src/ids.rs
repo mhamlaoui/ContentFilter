@@ -55,6 +55,12 @@ macro_rules! opaque_id_type {
 
 opaque_id_type!(HouseholdId, "Opaque 128-bit household identifier.");
 opaque_id_type!(DeviceId, "Opaque 128-bit device identifier.");
+opaque_id_type!(
+    RequestId,
+    "Opaque 128-bit identifier for a single weakening/approval request. \
+     Enforced single-use where it matters (svc-approvals) — that \
+     bookkeeping lives with whoever tracks request state, not here."
+);
 
 #[cfg(test)]
 mod tests {
