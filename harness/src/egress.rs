@@ -74,12 +74,30 @@ mod imp {
                 "dir=out",
                 "action=block",
                 "protocol=TCP",
+                "profile=any",
                 // "remoteport" is the destination port for an outbound
                 // rule; "localport" would match the client's ephemeral
                 // source port instead and never block anything.
                 &format!("remoteport={port}"),
             ])
             .status()?;
+
+        eprintln!("--- diagnostics: firewall profile state ---");
+        let _ = Command::new("netsh")
+            .args(["advfirewall", "show", "allprofiles", "state"])
+            .status();
+        eprintln!("--- diagnostics: rule as created ---");
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "show",
+                "rule",
+                &format!("name={rule_name}"),
+                "verbose",
+            ])
+            .status();
+
         if !status.success() {
             return Err(io::Error::other("netsh add rule failed"));
         }
