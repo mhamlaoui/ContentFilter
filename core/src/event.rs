@@ -104,8 +104,8 @@ mod tests {
         let obj = value.as_object().unwrap();
         assert_eq!(
             obj.len(),
-            4,
-            "kind, household_id, device_id, occurred_at only"
+            5,
+            "version, kind, household_id, device_id, occurred_at only"
         );
     }
 
