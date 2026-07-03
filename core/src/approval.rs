@@ -502,11 +502,12 @@ mod tests {
     // on every platform, forever, or cross-platform verification (Swift/
     // Kotlin bindings via UniFFI) breaks.
     //
-    // TODO(pending CI run): the expected signature below is a placeholder.
-    // Local `cargo test` is blocked by Smart App Control on this dev
-    // machine, so the real value will come from a CI failure's assertion
-    // output and get hardcoded here in a follow-up commit — see the PR/
-    // issue for that run.
+    // Pinned from an actual CI run (local `cargo test` is blocked by Smart
+    // App Control on this dev machine): both windows-latest and
+    // ubuntu-latest produced these exact bytes, which is itself useful
+    // evidence — cross-platform byte-for-byte agreement is the property
+    // that matters once Swift/Kotlin UniFFI bindings call this same code.
+    // https://github.com/mhamlaoui/ContentFilter/actions/runs/28687717594
     #[test]
     fn known_answer_vector() {
         let signing_key = SigningKey::from_bytes(&[0x01; 32]);
@@ -521,19 +522,17 @@ mod tests {
         )
         .unwrap();
 
-        let expected_canonical_hex = "PENDING_CI_RUN";
-        let expected_signature_hex = "PENDING_CI_RUN";
+        let expected_canonical_hex =
+            "436f6e74656e7446696c7465722d417070726f76616c2d763100111111111111\
+            11111111111111111111222222222222222222222222222222220007756e626c6f636b0006736f6369616\
+            c000000006553f100000000006553ff10333333333333333333333333333333333333333333333333";
+        let expected_signature_hex =
+            "0f42795007f44f5a335d7cee4ce497f9d7b63ebfd9adb2972d0d4897cc8d9af\
+            85152ae0d60d77939a28ed7cd8e80532560b99f78575531b27c17fbc06d39a707";
 
         let canonical = statement.canonical_encode().unwrap();
         let sig = sign(&statement, &signing_key).unwrap();
 
-        if expected_canonical_hex == "PENDING_CI_RUN" {
-            panic!(
-                "known-answer vector not yet pinned; actual canonical bytes = {}, actual signature = {}",
-                crate::hex::encode(&canonical),
-                crate::hex::encode(&sig.0),
-            );
-        }
         assert_eq!(crate::hex::encode(&canonical), expected_canonical_hex);
         assert_eq!(crate::hex::encode(&sig.0), expected_signature_hex);
     }
