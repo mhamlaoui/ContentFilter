@@ -12,12 +12,6 @@ use std::time::Duration;
 /// Returns a real, non-loopback local IP by asking the OS which interface
 /// it would route through to reach an arbitrary external address (no
 /// packets are actually sent — UDP `connect` just does a routing lookup).
-///
-/// Firewall rules matched against 127.0.0.1 are unreliable to test against:
-/// self-connections over the loopback interface bypass outbound filtering
-/// on at least some Windows configurations, observed empirically in CI
-/// (a `remoteport`-correct block rule had no effect on a 127.0.0.1
-/// connection). Binding on a real interface address avoids that.
 pub fn local_nonloopback_ip() -> io::Result<IpAddr> {
     let probe = UdpSocket::bind("0.0.0.0:0")?;
     probe.connect("8.8.8.8:80")?;
@@ -43,12 +37,28 @@ pub fn block_outbound_tcp(port: u16) -> io::Result<BlockGuard> {
     imp::block_outbound_tcp(port)
 }
 
+/// Confirmed empirically to be unreliable on Windows for a same-host
+/// connection, even against a real (non-loopback) interface address:
+/// Windows appears to route same-host TCP connections through a fast path
+/// that bypasses the outbound filter regardless of a correctly-scoped
+/// block rule being active (verified via `netsh ... show rule verbose`
+/// reporting `Action: Block` while the connection still succeeded). On
+/// Windows, use [`rule_blocks_port`] to verify the rule itself instead.
+/// Linux's `iptables OUTPUT` chain does not have this problem.
 pub fn assert_egress_denied(addr: SocketAddr) {
     let result = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
     assert!(
         result.is_err(),
         "expected egress to {addr} to be denied, but it succeeded"
     );
+}
+
+/// Windows-only: checks the block rule for `port` (created by
+/// [`block_outbound_tcp`]) is present and actually configured to block, as
+/// a substitute for a live connection attempt. See [`assert_egress_denied`].
+#[cfg(windows)]
+pub fn rule_blocks_port(port: u16) -> io::Result<bool> {
+    imp::rule_blocks_port(port)
 }
 
 pub fn assert_egress_allowed(addr: SocketAddr) {
@@ -81,13 +91,15 @@ mod imp {
                 &format!("remoteport={port}"),
             ])
             .status()?;
+        if !status.success() {
+            return Err(io::Error::other("netsh add rule failed"));
+        }
+        Ok(BlockGuard { rule_name })
+    }
 
-        eprintln!("--- diagnostics: firewall profile state ---");
-        let _ = Command::new("netsh")
-            .args(["advfirewall", "show", "allprofiles", "state"])
-            .status();
-        eprintln!("--- diagnostics: rule as created ---");
-        let _ = Command::new("netsh")
+    pub fn rule_blocks_port(port: u16) -> io::Result<bool> {
+        let rule_name = format!("cf-test-harness-block-{port}");
+        let output = Command::new("netsh")
             .args([
                 "advfirewall",
                 "firewall",
@@ -96,12 +108,20 @@ mod imp {
                 &format!("name={rule_name}"),
                 "verbose",
             ])
-            .status();
-
-        if !status.success() {
-            return Err(io::Error::other("netsh add rule failed"));
+            .output()?;
+        if !output.status.success() {
+            return Ok(false);
         }
-        Ok(BlockGuard { rule_name })
+        let text = String::from_utf8_lossy(&output.stdout);
+        let field = |key: &str| -> Option<String> {
+            text.lines()
+                .find(|l| l.trim_start().starts_with(key))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        };
+        Ok(field("Enabled").as_deref() == Some("Yes")
+            && field("Action").as_deref() == Some("Block")
+            && field("RemotePort").as_deref() == Some(port.to_string().as_str()))
     }
 
     impl Drop for BlockGuard {

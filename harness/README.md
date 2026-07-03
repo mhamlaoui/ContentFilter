@@ -28,5 +28,17 @@ Windows runner, confirm the service account has local admin rights, or the
 `netsh` calls in `src/egress.rs` will fail with a permissions error rather
 than silently passing.
 
+Confirmed empirically in CI: a live same-host connection attempt cannot
+prove Windows outbound blocking, even against a real (non-loopback)
+interface address — Windows appears to route same-host TCP through a fast
+path that bypasses the filter regardless of a correctly-scoped, verified
+`Action: Block` rule being active. `tests/dns_and_egress.rs` therefore
+verifies the rule's own state via `rule_blocks_port` on Windows instead of
+attempting a live connection. Linux's `iptables OUTPUT` chain doesn't have
+this problem, so the Linux path uses the real connection-based assertion.
+When `svc-egress-wfp` exists for real, re-evaluate whether this limitation
+still applies to its actual WFP callout (it may not, since ALE callouts can
+differ from userspace firewall rules).
+
 On `ubuntu-latest`, the equivalent path uses `sudo iptables`; GitHub-hosted
 Ubuntu runners have passwordless sudo for the default user.

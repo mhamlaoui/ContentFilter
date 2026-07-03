@@ -1,7 +1,7 @@
 use cf_test_harness::dns::{assert_resolves, assert_sinkholed, DnsFixture, Outcome};
-use cf_test_harness::egress::{
-    assert_egress_allowed, assert_egress_denied, block_outbound_tcp, local_nonloopback_ip,
-};
+#[cfg(not(windows))]
+use cf_test_harness::egress::assert_egress_denied;
+use cf_test_harness::egress::{assert_egress_allowed, block_outbound_tcp, local_nonloopback_ip};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener};
 
@@ -37,7 +37,23 @@ fn egress_port_is_denied_once_blocked() {
     assert_egress_allowed(addr);
 
     let guard = block_outbound_tcp(addr.port()).expect("apply firewall rule");
-    assert_egress_denied(addr);
+
+    // Windows routes same-host TCP connections through a fast path that
+    // bypasses outbound filtering even with a correctly-scoped block rule
+    // active, so a live connection attempt can't prove blocking there.
+    // Verify the rule itself instead; see assert_egress_denied's doc comment.
+    #[cfg(windows)]
+    {
+        let port = addr.port();
+        assert!(
+            cf_test_harness::egress::rule_blocks_port(port).unwrap_or(false),
+            "expected an active outbound block rule for port {port}"
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        assert_egress_denied(addr);
+    }
 
     drop(guard);
     assert_egress_allowed(addr);
