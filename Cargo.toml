@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "service",
+    "tray",
+    "guardian",
+    "relay",
+    "screen-cv",
+    "installer/custom-actions",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/mhamlaoui/ContentFilter"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
