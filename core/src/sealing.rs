@@ -188,39 +188,32 @@ mod tests {
 
     // --- known-answer vectors -------------------------------------------------
     // Pinned from an actual CI run (local cargo test is blocked by Smart App
-    // Control on this dev machine).
+    // Control on this dev machine):
+    // https://github.com/mhamlaoui/ContentFilter/actions/runs/28736919319
 
     #[test]
     fn known_answer_hash() {
+        // HMAC-SHA256 is deterministic, so unlike the seal/open vector
+        // below, both OSes produced this exact same hash.
         let hash = salted_request_hash(b"fixed-test-salt", "example.com");
-        let expected = "PENDING_CI_RUN";
-        if expected == "PENDING_CI_RUN" {
-            panic!(
-                "known-answer vector not yet pinned; actual hash = {}",
-                crate::hex::encode(&hash)
-            );
-        }
+        let expected = "974e0cbe369ba674eb72d2b8708799b504a02fe1df2109cd73d266ef7500360f";
         assert_eq!(crate::hex::encode(&hash), expected);
     }
 
     #[test]
     fn known_answer_seal_open() {
         // Sealing includes a fresh ephemeral key every call, so unlike
-        // Ed25519 signing there is no fixed "expected ciphertext" — the
-        // KAT instead pins that a fixed key can open a fixed prior
-        // ciphertext, proving on-disk-format stability across dependency
-        // upgrades (a crypto_box version bump changing its wire format
-        // would break real deployed data, not just this test).
-        let (sk, pk) = keypair_from_seed(0x77);
-        let _ = &pk; // the pinned ciphertext below was sealed to this key
-        let pinned_ciphertext_hex = "PENDING_CI_RUN";
-        if pinned_ciphertext_hex == "PENDING_CI_RUN" {
-            let sealed = seal(&pk, b"known-answer-plaintext").unwrap();
-            panic!(
-                "known-answer vector not yet pinned; a valid sealed payload for seed 0x77 = {}",
-                crate::hex::encode(&sealed.0)
-            );
-        }
+        // Ed25519 signing there is no fixed "expected ciphertext" — windows
+        // and ubuntu each produced a different (equally valid) sealed
+        // payload in the pinning run. This KAT instead pins that a fixed
+        // key can open a fixed prior ciphertext (the ubuntu-latest one),
+        // proving on-disk-format stability across dependency upgrades — a
+        // crypto_box version bump changing its wire format would break
+        // real deployed data, not just this test.
+        let (sk, _pk) = keypair_from_seed(0x77);
+        let pinned_ciphertext_hex =
+            "c4a41a3e7af0b8ee92866460a17041f3af20f5d20ba4a2337983a2025a1b6f1\
+            8a3b683dcb7ccbb57b8c25361dbf3f0a88e2bacfbed8f3b601e539985bade8d3ed0f3c68350a5";
         let sealed_bytes = crate::hex::decode_any(pinned_ciphertext_hex).unwrap();
         let opened = open(&sk.to_bytes(), &SealedPayload(sealed_bytes)).unwrap();
         assert_eq!(opened, b"known-answer-plaintext");
