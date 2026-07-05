@@ -107,8 +107,8 @@ pub async fn run(
     let listener = TcpListener::bind(config.bind_addr).await?;
     run_with_listener(
         listener,
-        &config.tls_cert_path,
-        &config.tls_key_path,
+        config.tls_cert_path,
+        config.tls_key_path,
         shutdown,
     )
     .await
@@ -119,13 +119,19 @@ pub async fn run(
 /// back the real port via `TcpListener::local_addr` before the server
 /// starts accepting — `run` alone gives no way to learn that port from
 /// the outside.
+///
+/// Takes owned `PathBuf`s, not `&Path`: this function is meant to be
+/// spawned as a background task (tests do; so might a real caller), and an
+/// async fn's borrowed parameters must outlive the returned future — which
+/// a `'static`-bound spawned task can't guarantee for a borrow from the
+/// caller's local stack.
 pub async fn run_with_listener(
     listener: TcpListener,
-    tls_cert_path: &Path,
-    tls_key_path: &Path,
+    tls_cert_path: PathBuf,
+    tls_key_path: PathBuf,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let tls_config = load_tls_config(tls_cert_path, tls_key_path)?;
+    let tls_config = load_tls_config(&tls_cert_path, &tls_key_path)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     tracing::info!(addr = %listener.local_addr()?, "relay starting");
 

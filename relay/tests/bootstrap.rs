@@ -47,8 +47,8 @@ async fn health_check_returns_200_over_tls() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(cf_relay::run_with_listener(
         listener,
-        &cert_path,
-        &key_path,
+        cert_path.clone(),
+        key_path.clone(),
         async {
             let _ = shutdown_rx.await;
         },
@@ -85,8 +85,8 @@ async fn plaintext_http_is_refused_not_served() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(cf_relay::run_with_listener(
         listener,
-        &cert_path,
-        &key_path,
+        cert_path.clone(),
+        key_path.clone(),
         async {
             let _ = shutdown_rx.await;
         },
@@ -134,8 +134,8 @@ async fn shutdown_drains_an_in_flight_request_instead_of_dropping_it() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tokio::spawn(cf_relay::run_with_listener(
         listener,
-        &cert_path,
-        &key_path,
+        cert_path.clone(),
+        key_path.clone(),
         async {
             let _ = shutdown_rx.await;
         },
