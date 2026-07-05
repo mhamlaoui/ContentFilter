@@ -1,0 +1,217 @@
+//! Relay service bootstrap (relay-bootstrap): the axum/tokio HTTP backbone
+//! with TLS termination, structured logging, and graceful shutdown that
+//! everything else in the relay epic builds on. Mints and decrypts
+//! nothing — see the crate-level context in `main.rs`.
+//!
+//! There is deliberately no plaintext listening mode anywhere in this
+//! crate — not even one that defaults to off. [`RelayConfig`] requires a
+//! cert and key path unconditionally, and [`run`] only ever accepts
+//! connections through a [`tokio_rustls::TlsAcceptor`]. "TLS enforced" is
+//! a much stronger guarantee when the code path to serve plaintext doesn't
+//! exist than when it exists behind a flag someone could flip.
+//!
+//! Hand-rolls the accept loop over `axum-server` (which would otherwise be
+//! the obvious choice): `axum-server` 0.6.0's `bind_rustls().serve()`
+//! unconditionally uses hyper-util's `serve_connection_with_upgrades`
+//! internally, which doesn't satisfy the trait bounds axum's current body
+//! type needs — a real incompatibility between the latest axum-server
+//! release and current axum, not a version pin this crate can route
+//! around. This server doesn't need HTTP upgrades (no WebSockets here),
+//! so the plain `serve_connection` path sidesteps the issue entirely.
+
+use axum::Router;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use hyper_util::service::TowerToHyperService;
+use rustls_pemfile::{certs, private_key};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::future::Future;
+use std::io::BufReader;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RelayConfig {
+    pub bind_addr: SocketAddr,
+    pub tls_cert_path: PathBuf,
+    pub tls_key_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Io(std::io::Error),
+    Parse(toml::de::Error),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Io(e) => write!(f, "could not read config file: {e}"),
+            ConfigError::Parse(e) => write!(f, "could not parse config file: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl RelayConfig {
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+        toml::from_str(&text).map_err(ConfigError::Parse)
+    }
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+async fn health() -> axum::Json<HealthResponse> {
+    axum::Json(HealthResponse { status: "ok" })
+}
+
+pub fn app() -> Router {
+    Router::new().route("/healthz", axum::routing::get(health))
+}
+
+/// How long a graceful shutdown waits for in-flight connections to finish
+/// before dropping them anyway.
+pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+
+fn load_tls_config(cert_path: &Path, key_path: &Path) -> std::io::Result<rustls::ServerConfig> {
+    let cert_file = std::fs::File::open(cert_path)?;
+    let cert_chain = certs(&mut BufReader::new(cert_file)).collect::<Result<Vec<_>, _>>()?;
+    let key_file = std::fs::File::open(key_path)?;
+    let key = private_key(&mut BufReader::new(key_file))?
+        .ok_or_else(|| std::io::Error::other("no private key found in tls_key_path"))?;
+
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .map_err(std::io::Error::other)
+}
+
+/// Runs the relay until `shutdown` resolves, then stops accepting new
+/// connections and waits (up to [`SHUTDOWN_GRACE_PERIOD`]) for in-flight
+/// connections to finish before returning.
+pub async fn run(
+    config: RelayConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(config.bind_addr).await?;
+    run_with_listener(
+        listener,
+        &config.tls_cert_path,
+        &config.tls_key_path,
+        shutdown,
+    )
+    .await
+}
+
+/// Same as [`run`], but takes an already-bound listener. Lets a caller
+/// (tests, mainly) bind to an OS-assigned port (`127.0.0.1:0`) and read
+/// back the real port via `TcpListener::local_addr` before the server
+/// starts accepting — `run` alone gives no way to learn that port from
+/// the outside.
+pub async fn run_with_listener(
+    listener: TcpListener,
+    tls_cert_path: &Path,
+    tls_key_path: &Path,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let tls_config = load_tls_config(tls_cert_path, tls_key_path)?;
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    tracing::info!(addr = %listener.local_addr()?, "relay starting");
+
+    let app = app();
+    let mut connections = JoinSet::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            () = &mut shutdown => {
+                tracing::info!("shutdown signal received, draining in-flight connections");
+                break;
+            }
+            accepted = listener.accept() => {
+                let Ok((tcp_stream, _peer_addr)) = accepted else { continue };
+                let acceptor = acceptor.clone();
+                let app = app.clone();
+                connections.spawn(async move {
+                    let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                        return;
+                    };
+                    let io = TokioIo::new(tls_stream);
+                    let service = TowerToHyperService::new(app);
+                    let _ = ConnBuilder::new(TokioExecutor::new())
+                        .serve_connection(io, service)
+                        .await;
+                });
+            }
+        }
+    }
+
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_config_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(
+            &path,
+            r#"
+            bind_addr = "127.0.0.1:8443"
+            tls_cert_path = "cert.pem"
+            tls_key_path = "key.pem"
+            "#,
+        )
+        .unwrap();
+
+        let config = RelayConfig::load(&path).unwrap();
+        assert_eq!(config.bind_addr.port(), 8443);
+        assert_eq!(config.tls_cert_path, PathBuf::from("cert.pem"));
+    }
+
+    #[test]
+    fn missing_file_is_an_io_error() {
+        let result = RelayConfig::load(Path::new("does/not/exist.toml"));
+        assert!(matches!(result, Err(ConfigError::Io(_))));
+    }
+
+    #[test]
+    fn malformed_toml_is_a_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(&path, "this is not valid toml {{{").unwrap();
+        let result = RelayConfig::load(&path);
+        assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn config_with_no_tls_paths_is_rejected_at_parse_time() {
+        // Landmine: there must be no way to construct a RelayConfig
+        // without TLS cert/key paths — no Option<PathBuf>, no default. If
+        // someone adds one to make a field "optional," this test starts
+        // failing instead of silently allowing a plaintext-capable config.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(&path, r#"bind_addr = "127.0.0.1:8443""#).unwrap();
+        assert!(RelayConfig::load(&path).is_err());
+    }
+}
