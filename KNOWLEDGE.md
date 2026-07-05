@@ -13,6 +13,10 @@
 - [2026-07-05] [source: cowork] Hive Mind layer added around existing docs: RULES.md (invariants), this file (reusable knowledge), STATE.md (volatile). CLAUDE.md remains the operating guide; MEMO.md remains the work log.
 - [2026-07-05] [source: human, via CLAUDE.md] `cf-core` is linked by every platform (Windows, relay, future UniFFI iOS/Android) — dependency additions there carry the highest bar.
 - [2026-07-05] [source: human, via CLAUDE.md] There is NO design doc in this repo despite ticket DoD references to one. Say so explicitly (pattern: issues #16, #17, #19–21); never invent content to match a phantom doc.
+- [2026-07-05] [source: claude-code] Weakening clock rules (core-weakening, #25): `requested_at = max(local, floor)`; cooling-off completion is floor-only (`has_reached`) so it structurally requires post-request relay contact; expiry checks use `max(local, floor)`. Direction picks the primitive: "has time passed?" → floor only; "is it over?" → max. Reuse this for any new timed control; residuals in THREAT_MODEL.md.
+- [2026-07-05] [source: claude-code] Locked-tier policy (core-weakening): every weakening is ApprovalOnly — no timeout path exists, generalizing lock-uninstall-approval. svc-approvals and lock-* tickets must preserve this; the matrix tests in weakening.rs will break loudly if it drifts.
+- [2026-07-05] [source: claude-code] Privacy pattern: make domains *unrepresentable* in relay-bound types rather than stripped by discipline — `UnblockDomain` carries only `sealing::salted_request_hash` output, and the approval's signed target binds change + duration via `canonical_target`. Follow for any new relay-visible type.
+- [2026-07-05] [source: claude-code] Verdict verification (approve AND veto) lives inside cf-core at the point of consequence; vetoes are partner-signed to prevent accountability-log misattribution. Service layers must not add an unsigned path to Effective/Vetoed.
 
 ## Framework Intel (Rust/Windows/CI gotchas)
 
@@ -28,3 +32,4 @@
 - [2026-07-05] [source: human, via CLAUDE.md] Backticks inside double-quoted `gh --body "..."` arguments execute as command substitution and silently eat words (happened twice) → always `--body-file` with a scratch file.
 - [2026-07-05] [source: human, via MEMO.md] Bare `return` in a bash function under `set -e` inherits a false `&&` test's exit status and kills the script — use `return 0` explicitly.
 - [2026-07-05] [source: human, via CLAUDE.md] CI round-trips find real bugs local reasoning can't (relay-bootstrap: 6 round-trips, 3 genuine bugs). Push early instead of over-reasoning about untestable code.
+- [2026-07-05] [source: claude-code] core-weakening passed CI on the first round-trip (test-heavy ticket, ~28 tests). What differed from relay-bootstrap: pure logic over already-CI-proven primitives, plus a pre-push audit of test code for the known local blind spots (imports actually used, PartialEq/Debug on asserted types, serde internal-tag nuances like deny_unknown_fields not applying to tagged enums, const-constructibility). The audit is cheap — do it every time, but still don't skip the push.

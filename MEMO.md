@@ -202,6 +202,37 @@ truth.
     signal before the request future was ever polled.
 - `CLAUDE.md`, `MEMO.md` added — instructions for future sessions and this
   running log.
+- Hive Mind layer committed (`c19732d`): `RULES.md` (non-negotiables),
+  `KNOWLEDGE.md` (append-only reusable knowledge), `STATE.md` (volatile
+  session handoff), `.claudeignore`; CLAUDE.md gained the layer's
+  description and startup sequence. Authored by Cowork the same day,
+  committed by the following Claude Code session.
+- `core-weakening` (#25, closed): `core/src/weakening.rs` — the weakening
+  state machine. Commit `2a2c633`, CI green on both OSes on the **first**
+  round-trip (a first for a test-heavy ticket here):
+  https://github.com/mhamlaoui/ContentFilter/actions/runs/28752690733
+  - Policy matrix defined in-repo (the "design section 7.3" it references
+    doesn't exist — same handling as #20/#21): strengthen → Instant;
+    weaken → DelayOrApproval (Hardened) / ApprovalOnly (Locked); all 22
+    (change × tier) rows pinned by a table-driven test with a
+    compile-time exhaustiveness guard.
+  - Clock rules: `requested_at = max(local, floor)`; cooling-off
+    completion is floor-only (`has_reached`), so no weakening becomes
+    effective without post-request relay contact; expiry checks
+    (approval windows, temporary weakenings) use `max(local, floor)`.
+    Two honest residuals documented in THREAT_MODEL.md in the same
+    commit (understating requested_at needs rollback + beacon starvation
+    together; auto-revert can be delayed by the same combination).
+  - Approvals **and** vetoes are Ed25519-verified inside the machine at
+    the point of consequence (vetoes signed to prevent log
+    misattribution); the signed target binds change + duration
+    (`canonical_target`); domains are unrepresentable — `UnblockDomain`
+    carries only `salted_request_hash` output, so requests/events are
+    relay-safe by construction.
+  - `EventKind` gained the weakening lifecycle variants event.rs had
+    reserved (no separate `WeakeningApproved`; `WeakeningEffective.via`
+    records cooling-off vs partner approval).
+    `TimeAnchor::floor_utc()` made public for grant timestamps.
 
 ---
 
@@ -217,8 +248,8 @@ truth.
 
 ## Next unblocked tickets (per BACKLOG.md wave order)
 
-- `core-weakening` (blocked by core-timeanchor + core-crypto-approvals — both done)
-- `core-relay-client` (blocked by core-models + core-hashchain — both done)
-- `svc-skeleton` (e-service epic; blocked by core-models only — done). Different
+- ~~`core-weakening`~~ — done (#25 closed, `2a2c633`)
+- `core-relay-client` (#26; blocked by core-models + core-hashchain — both done)
+- `svc-skeleton` (#39; e-service epic; blocked by core-models only — done). Different
   risk profile from everything above: involves actually installing/starting/
   stopping a Windows service via SCM, not just application-level Rust.
