@@ -145,3 +145,14 @@ Never commit private key material. `tools/check_no_private_keys.sh` runs in
 CI as a guard, but it's a backstop, not the actual control — the actual
 control is that release/anchor private keys are generated offline per
 `docs/KEY_CEREMONY.md` and never touch a machine that runs this repo's code.
+
+
+## Hive Mind layer (added 2026-07-05)
+
+This repo now has three companion files shared between Claude Code and Cowork:
+
+- `RULES.md` — non-negotiables distilled from this file + THREAT_MODEL.md. Read it silently before writing or refactoring any code; if a request conflicts with it, flag the conflict instead of proceeding.
+- `KNOWLEDGE.md` — **append-only** reusable knowledge (decisions, gotchas, lessons). Never rewrite or reorder entries; append with date + source. MEMO.md remains the commit-referenced work log — log *what happened* there, log *what to remember* in KNOWLEDGE.md.
+- `STATE.md` — volatile session state (todos, blockers, handoff). **Rewrite it at the end of every session** so the next session resumes with zero re-explanation. An outdated STATE.md is a bug.
+
+Startup sequence: RULES.md → STATE.md → relevant KNOWLEDGE.md sections → this file's ticket workflow.

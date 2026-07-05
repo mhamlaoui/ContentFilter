@@ -1,0 +1,26 @@
+# Build artifacts (huge)
+target/
+
+# VCS internals
+.git/
+
+# Obsidian vault internals (if vault is opened here)
+.obsidian/
+.trash/
+
+# Lockfile — large, low signal; consult via cargo tree instead
+Cargo.lock
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Never load key material into context
+keys/*.pem
+keys/*.key
+*.keystore
+
+# Logs
+*.log
