@@ -1099,14 +1099,15 @@ mod tests {
             b"kat-payload".to_vec(),
             &release_sk,
         );
-        // Canonical bytes pinned from CI run 28756643807 (local cargo test
-        // is blocked by Smart App Control on this dev machine); identical
-        // on both OSes. Signature pending its own run — asserted as a
-        // tuple so a failure prints every actual value at once.
+        // Pinned from actual CI runs (local cargo test is blocked by Smart
+        // App Control on this dev machine); identical on both OSes.
+        // Canonical: run 28756643807. Signature: run 28756729716.
         let expected_canonical_hex =
             "436f6e74656e7446696c7465722d466565642d76310001000000000000002a\
             000000006553f1000000000b6b61742d7061796c6f6164";
-        let expected_signature_hex = "PENDING_CI_RUN";
+        let expected_signature_hex =
+            "eefee31e313c5e0dd02d6673d422b2761176011cce466b569e2c67da076ddcf7\
+            cc22f672ecb9763a4f425e3212c34aeaca3787e2616a3f749cc827690204e00b";
         let canonical = FeedEnvelope::canonical_bytes(
             envelope.kind,
             envelope.feed_seq,
