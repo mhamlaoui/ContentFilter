@@ -20,7 +20,7 @@ workspace = true
 cf-core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = "0.7"
-hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+hyper-util = { version = "0.1.20", features = ["server-auto", "server-graceful", "tokio", "service"] }
 # default-features off: rustls 0.23 otherwise pulls aws-lc-sys, a C library
 # needing cmake to build. Given the effort core-repro-builds already spent
 # getting pure-Rust, no-C-toolchain reproducible builds working, adding a C

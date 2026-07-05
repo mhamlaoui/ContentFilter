@@ -94,25 +94,34 @@ async fn plaintext_http_is_refused_not_served() {
         },
     ));
 
-    let plaintext_result = tokio::task::spawn_blocking(move || {
-        let mut stream = StdTcpStream::connect(addr).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        stream
-            .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .unwrap();
+    // Returns the bytes actually read (possibly none), rather than just an
+    // io::Result<usize>, so the assertion below can inspect their content.
+    let plaintext_result: std::io::Result<Vec<u8>> = tokio::task::spawn_blocking(move || {
+        let mut stream = StdTcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        stream.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
         let mut buf = [0u8; 64];
-        stream.read(&mut buf)
+        let n = stream.read(&mut buf)?;
+        Ok(buf[..n].to_vec())
     })
     .await
     .unwrap();
 
-    // Either the read errors (connection reset/timeout) or returns 0 bytes
-    // (clean close) — what it must never do is look like an HTTP response.
+    // The acceptor tries to parse the plaintext bytes as a TLS ClientHello,
+    // fails, and (per the TLS spec) sends a fatal alert record before
+    // closing — a handful of raw bytes (e.g. a 7-byte alert: 5-byte record
+    // header + 2-byte alert body) is expected and correct. A read erroring
+    // out (reset/timeout) is also fine. What must never happen is those
+    // bytes forming a valid-looking HTTP response, which would mean the
+    // plaintext request actually reached the health handler.
     match plaintext_result {
-        Ok(0) => {} // connection closed without sending anything
-        Ok(n) => panic!("expected no plaintext response, got {n} bytes"),
+        Ok(bytes) if bytes.is_empty() => {} // connection closed without sending anything
+        Ok(bytes) => {
+            assert!(
+                !bytes.starts_with(b"HTTP/"),
+                "plaintext request got an HTTP-looking response: {bytes:?}"
+            );
+        }
         Err(_) => {} // reset or timed out, also acceptable
     }
 

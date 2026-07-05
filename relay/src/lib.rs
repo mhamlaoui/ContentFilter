@@ -22,6 +22,7 @@
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use rustls_pemfile::{certs, private_key};
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,7 +155,14 @@ pub async fn run_with_listener(
     tracing::info!(addr = %listener.local_addr()?, "relay starting");
 
     let app = app();
-    let mut connections = JoinSet::new();
+    // A JoinSet of raw tasks isn't enough for graceful shutdown: an
+    // HTTP/1.1 keep-alive connection's task doesn't finish just because we
+    // stop accepting new connections — it stays open waiting for a
+    // possible next request until the *client* closes it, which a
+    // TLS-terminating relay has no control over. GracefulShutdown solves
+    // this properly: `shutdown()` signals every watched connection to
+    // finish its current exchange and refuse further keep-alive reuse.
+    let graceful = GracefulShutdown::new();
     let mut shutdown = std::pin::pin!(shutdown);
 
     loop {
@@ -168,24 +175,22 @@ pub async fn run_with_listener(
                 let Ok((tcp_stream, _peer_addr)) = accepted else { continue };
                 let acceptor = acceptor.clone();
                 let app = app.clone();
-                connections.spawn(async move {
+                let watcher = graceful.watcher();
+                tokio::spawn(async move {
                     let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
                         return;
                     };
                     let io = TokioIo::new(tls_stream);
                     let service = TowerToHyperService::new(app);
-                    let _ = ConnBuilder::new(TokioExecutor::new())
-                        .serve_connection(io, service)
-                        .await;
+                    let builder = ConnBuilder::new(TokioExecutor::new());
+                    let conn = builder.serve_connection(io, service);
+                    let _ = watcher.watch(conn).await;
                 });
             }
         }
     }
 
-    let _ = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, async {
-        while connections.join_next().await.is_some() {}
-    })
-    .await;
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, graceful.shutdown()).await;
 
     Ok(())
 }
