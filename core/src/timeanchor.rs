@@ -336,17 +336,16 @@ mod tests {
             utc: 1_700_000_000,
             seq: 42,
         };
-        let expected_canonical_hex = "PENDING_CI_RUN";
-        let expected_signature_hex = "PENDING_CI_RUN";
+        // Pinned from an actual CI run (local cargo test is blocked by
+        // Smart App Control on this dev machine); identical on both OSes.
+        // https://github.com/mhamlaoui/ContentFilter/actions/runs/28737155267
+        let expected_canonical_hex =
+            "436f6e74656e7446696c7465722d54696d65426561636f6e2d763100000000006553f100000000000000002a";
+        let expected_signature_hex =
+            "b5f737a5960ac3144b1bf372fbdda6d6db4b7bb71ddeb7655349aef46dfbb14\
+            a1ad27ef24fc0ae50de409e4d44c493d26973549785e51f8b370f8e0e1e368807";
         let canonical = beacon.canonical_encode();
         let sig = sign_beacon(&beacon, &signing_key);
-        if expected_canonical_hex == "PENDING_CI_RUN" {
-            panic!(
-                "known-answer vector not yet pinned; actual canonical bytes = {}, actual signature = {}",
-                crate::hex::encode(&canonical),
-                crate::hex::encode(&sig.0),
-            );
-        }
         assert_eq!(crate::hex::encode(&canonical), expected_canonical_hex);
         assert_eq!(crate::hex::encode(&sig.0), expected_signature_hex);
     }
