@@ -233,6 +233,28 @@ truth.
     reserved (no separate `WeakeningApproved`; `WeakeningEffective.via`
     records cooling-off vs partner approval).
     `TimeAnchor::floor_utc()` made public for grant timestamps.
+- `core-relay-client` (#26, closed): `core/src/relay_client.rs` — sans-I/O
+  relay client over a synchronous `RelayTransport` trait (no HTTP dep in
+  cf-core; the DoD's "mock relay" is a mock transport, everything above
+  the seam is real). Commits `a6d3a8e`, `63e4c1d`, `7eb0d5a`; green run
+  https://github.com/mhamlaoui/ContentFilter/actions/runs/28756805635 —
+  three round-trips, one genuine CI-caught bug:
+  - **`checked_shl` guards the shift amount, not value overflow** —
+    `u32::MAX << 1` silently drops the top bit, so `Backoff` at the cap
+    *shrank* its delay. Widened the arithmetic to u64.
+  - Feed trust = pinned release key (`verify_strict`) + kind binding (a
+    validly-signed DoH feed must not pass as a blocklist) + per-kind seq
+    monotonicity (client-side downgrade protection). Feed schema version
+    lives in the domain tag, following ApprovalStatement.
+  - Outbox never silently drops: flush stops at the first failure and
+    keeps the failed event plus everything behind it. Approvals received,
+    not verified, in transit — the end-to-end test proves partner-sign →
+    relay → receive → `weakening::apply_approval` → effective.
+  - Registration checks the relay's echo (identity-key swap = hijacked
+    enrollment). Anchor *signature* explicitly not verified here — no
+    canonical anchor encoding exists yet; that's svc-config-anchor's job.
+  - `ChainedEvent` gained serde (hex fields; canonical signed encoding
+    untouched); reserialized chains still verify (test).
 
 ---
 
@@ -249,7 +271,12 @@ truth.
 ## Next unblocked tickets (per BACKLOG.md wave order)
 
 - ~~`core-weakening`~~ — done (#25 closed, `2a2c633`)
-- `core-relay-client` (#26; blocked by core-models + core-hashchain — both done)
+- ~~`core-relay-client`~~ — done (#26 closed, `a6d3a8e`..`7eb0d5a`)
+- `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
+  both now done). Closes out the e-core epic.
+- `relay-auth` (#29; blocked by relay-bootstrap (closed) + core-crypto-approvals
+  (#21, open only for the fuzzing follow-up — functionally done, same basis on
+  which core-weakening proceeded)).
 - `svc-skeleton` (#39; e-service epic; blocked by core-models only — done). Different
   risk profile from everything above: involves actually installing/starting/
   stopping a Windows service via SCM, not just application-level Rust.

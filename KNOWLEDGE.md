@@ -17,6 +17,8 @@
 - [2026-07-05] [source: claude-code] Locked-tier policy (core-weakening): every weakening is ApprovalOnly — no timeout path exists, generalizing lock-uninstall-approval. svc-approvals and lock-* tickets must preserve this; the matrix tests in weakening.rs will break loudly if it drifts.
 - [2026-07-05] [source: claude-code] Privacy pattern: make domains *unrepresentable* in relay-bound types rather than stripped by discipline — `UnblockDomain` carries only `sealing::salted_request_hash` output, and the approval's signed target binds change + duration via `canonical_target`. Follow for any new relay-visible type.
 - [2026-07-05] [source: claude-code] Verdict verification (approve AND veto) lives inside cf-core at the point of consequence; vetoes are partner-signed to prevent accountability-log misattribution. Service layers must not add an unsigned path to Effective/Vetoed.
+- [2026-07-05] [source: claude-code] cf-core network code is sans-I/O: `RelayTransport` is a synchronous trait seam (like FloorStore/DeviceKeyResolver); HTTP/async never enters cf-core. Platform crates implement transports; protocol logic (feed verification, outbox ordering, registration echo checks) stays in core where every platform shares it.
+- [2026-07-05] [source: claude-code] Feed acceptance requires signature + kind + strict per-kind seq monotonicity — all three; every signed feed kind is a substitution candidate for every other without the kind check. Wire encodings for approvals are deliberately NOT defined in cf-core (no serde on ApprovalMessage) — relay-approvals-transport owns that; don't let a convenience derive become the de-facto format.
 
 ## Framework Intel (Rust/Windows/CI gotchas)
 
@@ -26,6 +28,8 @@
 - [2026-07-05] [source: human, via CLAUDE.md] MSVC linker embeds random GUID/timestamp per link — `/Brepro` link-arg required for byte-identical builds; `--remap-path-prefix` alone is not sufficient.
 - [2026-07-05] [source: human, via MEMO.md] Windows "Installer Detection" heuristic trips on crate names containing "installer" — `cf-installer-custom-actions` renamed to `cf-custom-actions`.
 - [2026-07-05] [source: human, via CLAUDE.md] CI KAT pattern: push `PENDING_CI_RUN` placeholder that panics printing the real value, then hardcode from CI output in a follow-up commit.
+- [2026-07-05] [source: claude-code] `checked_shl` guards the shift *amount* (None only when shift ≥ bit width), NOT value overflow — `u32::MAX.checked_shl(1)` happily returns a value with the top bit dropped. For overflow-safe exponential growth, widen to u64 (or use `checked_mul`). Caught by CI in cf-core's Backoff.
+- [2026-07-05] [source: claude-code] KAT pinning with multiple expected values: assert them as one tuple, not sequentially — a sequential first-assert panic hides the later actual values and costs an extra CI round-trip (happened on the feed KAT).
 
 ## Learnings
 
