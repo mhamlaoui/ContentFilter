@@ -15,6 +15,7 @@
 use crate::ids::DeviceId;
 use crate::keys::{Ed25519PublicKey, Signature as CfSignature};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
@@ -23,13 +24,23 @@ const DOMAIN_TAG: &[u8] = b"ContentFilter-ChainedEvent-v1\0";
 /// The `prev_hash` of the first event in a chain.
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Serde derives added by core-relay-client: events cross the wire (and
+/// sit in the offline outbox), so they need a serialized form. There is
+/// deliberately no `version: SchemaVersion` field — the canonical encoding
+/// is already versioned by its domain tag, and adding a field would change
+/// the signed bytes of a closed, CI-pinned design. Wire containers that
+/// carry these (e.g. `RelayClient`'s persisted state) carry the schema
+/// version instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChainedEvent {
     pub seq: u64,
+    #[serde(with = "crate::hex::serde_hex_32")]
     pub prev_hash: [u8; 32],
     pub device_id: DeviceId,
     pub event_type: String,
     pub ts: u64,
+    #[serde(with = "crate::hex::serde_hex_vec")]
     pub payload: Vec<u8>,
     pub sig: CfSignature,
 }
@@ -368,5 +379,34 @@ mod tests {
     #[test]
     fn find_gaps_on_empty_chain_is_empty() {
         assert!(find_gaps(&[]).is_empty());
+    }
+
+    // --- wire form (added by core-relay-client) --------------------------
+
+    #[test]
+    fn chained_events_round_trip_and_survive_reserialization_signed() {
+        // The serde form must preserve every signed byte: an event that
+        // round-trips through JSON has to still verify against the chain.
+        let device_id = DeviceId([1u8; 16]);
+        let (sk, vk) = keypair_from_seed(0x20);
+        let chain = build_chain(3, device_id, &sk);
+        let json = serde_json::to_string(&chain).unwrap();
+        let back: Vec<ChainedEvent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(chain, back);
+        assert!(verify_chain(&back, &resolver_for(device_id, vk)).is_ok());
+    }
+
+    #[test]
+    fn unknown_fields_on_a_wire_event_are_rejected() {
+        let device_id = DeviceId([1u8; 16]);
+        let (sk, _vk) = keypair_from_seed(0x20);
+        let chain = build_chain(1, device_id, &sk);
+        let mut value = serde_json::to_value(&chain[0]).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("smuggled".into(), serde_json::json!("payload"));
+        let result: Result<ChainedEvent, _> = serde_json::from_value(value);
+        assert!(result.is_err(), "unknown field should be rejected");
     }
 }

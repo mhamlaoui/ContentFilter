@@ -44,6 +44,41 @@ pub(crate) fn decode_any(s: &str) -> Result<Vec<u8>, ModelError> {
     Ok(out)
 }
 
+/// `#[serde(with = ...)]` helpers for hex-encoding byte fields on wire
+/// types — a JSON array of integers is the serde default for bytes and is
+/// both bloated and inconsistent with how every key/id type here already
+/// serializes.
+pub(crate) mod serde_hex_vec {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        super::decode_any(&s).map_err(D::Error::custom)
+    }
+}
+
+pub(crate) mod serde_hex_32 {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&super::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let bytes = super::decode_exact(&s, 32).map_err(D::Error::custom)?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
 fn nibble_to_char(n: u8) -> char {
     match n {
         0..=9 => (b'0' + n) as char,

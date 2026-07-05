@@ -25,6 +25,7 @@ pub mod hashchain;
 pub mod household;
 pub mod ids;
 pub mod keys;
+pub mod relay_client;
 pub mod sealing;
 pub mod timeanchor;
 pub mod version;
@@ -38,6 +39,10 @@ pub use hashchain::{ChainError, ChainedEvent, DeviceKeyResolver};
 pub use household::{Household, Tier, TrustAnchor};
 pub use ids::{DeviceId, HouseholdId, RequestId};
 pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
+pub use relay_client::{
+    ApprovalMessage, Backoff, FeedEnvelope, FeedKind, RegisterRequest, RegisterResponse,
+    RelayClient, RelayClientError, RelayTransport, TransportError,
+};
 pub use sealing::{SealError, SealedPayload};
 pub use timeanchor::{FloorStore, TimeAnchor, TimeAnchorError, TimeBeacon};
 pub use version::{ModelError, SchemaVersion, SCHEMA_VERSION};
