@@ -40,6 +40,7 @@ fn trusting_reqwest_client(cert_pem_path: &std::path::Path) -> reqwest::Client {
 
 #[tokio::test]
 async fn health_check_returns_200_over_tls() {
+    cf_relay::ensure_crypto_provider_installed();
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = generate_test_cert(dir.path());
     let (listener, addr) = bound_loopback_listener().await;
@@ -78,6 +79,7 @@ async fn plaintext_http_is_refused_not_served() {
     // TLS enforced means a plaintext client gets no valid HTTP response at
     // all, not a redirect or an error page — the TLS handshake itself is
     // the only thing this listener speaks.
+    cf_relay::ensure_crypto_provider_installed();
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = generate_test_cert(dir.path());
     let (listener, addr) = bound_loopback_listener().await;
@@ -127,6 +129,7 @@ async fn shutdown_drains_an_in_flight_request_instead_of_dropping_it() {
     // A request that's already in flight when shutdown is signaled must
     // still complete successfully — graceful shutdown stops accepting
     // *new* connections, it doesn't abandon ones already being served.
+    cf_relay::ensure_crypto_provider_installed();
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = generate_test_cert(dir.path());
     let (listener, addr) = bound_loopback_listener().await;

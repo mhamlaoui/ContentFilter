@@ -84,7 +84,26 @@ pub fn app() -> Router {
 /// before dropping them anyway.
 pub const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 
+/// rustls 0.23 refuses to guess a crypto backend when more than one is
+/// compiled into the binary (this crate selects `ring`; a dev-dependency
+/// like `reqwest` pulling its own rustls stack with default features can
+/// unify in `aws-lc-rs` alongside it). Installing explicitly resolves the
+/// ambiguity regardless of what else got linked in. Safe to call more than
+/// once (e.g. once per test in the same process) — a second call just
+/// finds a provider already installed, which is fine since it's the one
+/// this crate wants anyway.
+///
+/// Public, not just called internally from `load_tls_config`: a caller
+/// that also builds its own rustls-based client (integration tests using
+/// `reqwest`, say) can race this crate's own install if it initializes
+/// its TLS stack before an async-spawned server task gets scheduled.
+/// Calling this explicitly and synchronously up front removes that race.
+pub fn ensure_crypto_provider_installed() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> std::io::Result<rustls::ServerConfig> {
+    ensure_crypto_provider_installed();
     let cert_file = std::fs::File::open(cert_path)?;
     let cert_chain = certs(&mut BufReader::new(cert_file)).collect::<Result<Vec<_>, _>>()?;
     let key_file = std::fs::File::open(key_path)?;
