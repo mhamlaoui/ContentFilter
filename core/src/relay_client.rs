@@ -303,15 +303,16 @@ impl Backoff {
 
     /// The delay to wait before the attempt about to be made, advancing
     /// the internal counter: base, 2·base, 4·base, ... capped.
+    ///
+    /// Computed in u64: `checked_shl` only guards the shift *amount*, not
+    /// value overflow — `u32::MAX << 1` silently drops the top bit, which
+    /// CI caught as a shrinking delay. `(u32 as u64) << 31` cannot
+    /// overflow u64, so widening makes the cap comparison exact.
     pub fn next_delay_seconds(&mut self) -> u32 {
         let shift = self.attempt.min(31);
-        let delay = self
-            .base_seconds
-            .checked_shl(shift)
-            .unwrap_or(u32::MAX)
-            .min(self.cap_seconds);
+        let delay = (u64::from(self.base_seconds) << shift).min(u64::from(self.cap_seconds));
         self.attempt = self.attempt.saturating_add(1);
-        delay
+        delay as u32
     }
 
     /// Call on any successful relay contact.
@@ -1098,10 +1099,13 @@ mod tests {
             b"kat-payload".to_vec(),
             &release_sk,
         );
-        // PENDING_CI_RUN: pinned from an actual CI run (local cargo test
-        // is blocked by Smart App Control on this dev machine). The
-        // assertion failure output below prints the actual values.
-        let expected_canonical_hex = "PENDING_CI_RUN";
+        // Canonical bytes pinned from CI run 28756643807 (local cargo test
+        // is blocked by Smart App Control on this dev machine); identical
+        // on both OSes. Signature pending its own run — asserted as a
+        // tuple so a failure prints every actual value at once.
+        let expected_canonical_hex =
+            "436f6e74656e7446696c7465722d466565642d76310001000000000000002a\
+            000000006553f1000000000b6b61742d7061796c6f6164";
         let expected_signature_hex = "PENDING_CI_RUN";
         let canonical = FeedEnvelope::canonical_bytes(
             envelope.kind,
@@ -1110,14 +1114,15 @@ mod tests {
             &envelope.payload,
         );
         assert_eq!(
-            crate::hex::encode(&canonical),
-            expected_canonical_hex,
-            "actual canonical hex printed above"
-        );
-        assert_eq!(
-            crate::hex::encode(&envelope.signature.0),
-            expected_signature_hex,
-            "actual signature hex printed above"
+            (
+                crate::hex::encode(&canonical),
+                crate::hex::encode(&envelope.signature.0),
+            ),
+            (
+                expected_canonical_hex.to_string(),
+                expected_signature_hex.to_string(),
+            ),
+            "actual values printed above"
         );
     }
 }
