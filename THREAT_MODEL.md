@@ -93,6 +93,19 @@ That framing drives two hard requirements that run through every ticket below:
 - **Screen-content CV is opt-in and alert-only by default**; it is not a
   general surveillance layer and is out of scope for the Hardened/Locked
   network-enforcement guarantees above.
+- **Cooling-off start time (`core-weakening`) can be understated only by
+  combining a local clock rollback with beacon starvation at request time**
+  (`requested_at = max(local, floor)`, so neither alone suffices), and the
+  understatement is bounded by the starvation window. Completion is still
+  floor-only, so no weakening becomes effective without post-request relay
+  contact walking the floor to the deadline. Sustained beacon starvation
+  is independently visible as heartbeat silence (`relay-heartbeat-silence`).
+- **A temporary weakening's auto-revert can be delayed** by a local
+  rollback combined with beacon starvation *after* it became effective
+  (expiry is `max(local, floor)`; both inputs must lie). The revert fires
+  as soon as either input recovers; the enforcement-side backstop for the
+  fully-offline case is `svc-fail-closed` ("an offline temporary unblock
+  past its window reverts to blocked").
 
 ## Keeping this doc live
 

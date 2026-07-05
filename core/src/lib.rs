@@ -28,6 +28,7 @@ pub mod keys;
 pub mod sealing;
 pub mod timeanchor;
 pub mod version;
+pub mod weakening;
 
 pub use approval::{ApprovalError, ApprovalStatement};
 pub use device::{Device, DeviceRole, Platform};
@@ -40,3 +41,7 @@ pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
 pub use sealing::{SealError, SealedPayload};
 pub use timeanchor::{FloorStore, TimeAnchor, TimeAnchorError, TimeBeacon};
 pub use version::{ModelError, SchemaVersion, SCHEMA_VERSION};
+pub use weakening::{
+    ChangeDirection, EffectiveVia, FilterChange, Policy, RequestStatus, SaltedDomainHash,
+    Transition, WeakeningError, WeakeningRequest,
+};

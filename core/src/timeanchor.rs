@@ -107,7 +107,13 @@ impl<S: FloorStore> TimeAnchor<S> {
         self.store
     }
 
-    fn floor_utc(&self) -> u64 {
+    /// The relay-attested floor itself (0 before any beacon). Public since
+    /// core-weakening: when a cooling-off completes, the weakening's
+    /// effective window starts at the floor — the one timestamp that can't
+    /// be in the future, because the relay only ever signs true time. Not
+    /// a general-purpose "now": expiry and activation checks must still go
+    /// through [`Self::effective_now`] / [`Self::has_reached`].
+    pub fn floor_utc(&self) -> u64 {
         self.store.load_floor().map_or(0, |(utc, _)| utc)
     }
 
