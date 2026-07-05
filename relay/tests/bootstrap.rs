@@ -134,10 +134,16 @@ async fn plaintext_http_is_refused_not_served() {
 }
 
 #[tokio::test]
-async fn shutdown_drains_an_in_flight_request_instead_of_dropping_it() {
-    // A request that's already in flight when shutdown is signaled must
-    // still complete successfully — graceful shutdown stops accepting
-    // *new* connections, it doesn't abandon ones already being served.
+async fn shutdown_does_not_hang_on_an_idle_keepalive_connection() {
+    // Regression test for a real bug caught by this exact test suite in
+    // CI: a naive graceful-shutdown implementation (wait for spawned
+    // connection tasks to finish naturally) hangs forever on an HTTP/1.1
+    // keep-alive connection, because that task doesn't finish just because
+    // the server stops accepting new connections — it waits for a possible
+    // next request until the *client* closes it, which the server has no
+    // control over. A completed request whose connection is still open
+    // (kept alive for reuse, which reqwest does by default) must not block
+    // shutdown.
     cf_relay::ensure_crypto_provider_installed();
     let dir = tempfile::tempdir().unwrap();
     let (cert_path, key_path) = generate_test_cert(dir.path());
@@ -156,16 +162,19 @@ async fn shutdown_drains_an_in_flight_request_instead_of_dropping_it() {
     let client = trusting_reqwest_client(&cert_path);
     let url = format!("https://localhost:{}/healthz", addr.port());
 
-    // Fire the request and the shutdown signal essentially together; the
-    // request should still complete successfully.
-    let request = client.get(&url).send();
-    let _ = shutdown_tx.send(());
-    let response = request.await.expect("in-flight request should complete");
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .expect("request should succeed");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // The connection is still open at this point: reqwest's pool keeps it
+    // alive for reuse rather than closing it after one request.
 
+    let _ = shutdown_tx.send(());
     tokio::time::timeout(Duration::from_secs(5), server)
         .await
-        .expect("server should shut down within the grace period")
+        .expect("shutdown must not hang on an idle keep-alive connection")
         .unwrap()
         .unwrap();
 }
