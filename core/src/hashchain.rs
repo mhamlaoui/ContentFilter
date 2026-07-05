@@ -101,6 +101,20 @@ pub trait DeviceKeyResolver {
 }
 
 fn canonical_encode(event: &ChainedEvent) -> Vec<u8> {
+    // Silently-truncating length casts in a signed canonical encoding are
+    // a canonicalization-ambiguity forgery vector (two different
+    // event_type/payload splits could share bytes past a wrapped length
+    // prefix). No real event approaches these limits; fail loudly if one
+    // ever does. Guards added by core-relay-client's redteam pass — the
+    // encoding itself is unchanged.
+    assert!(
+        event.event_type.len() <= usize::from(u16::MAX),
+        "event_type exceeds the u16 length prefix"
+    );
+    assert!(
+        event.payload.len() <= u32::MAX as usize,
+        "payload exceeds the u32 length prefix"
+    );
     let mut buf = Vec::with_capacity(
         DOMAIN_TAG.len() + 8 + 32 + 16 + 2 + event.event_type.len() + 8 + 4 + event.payload.len(),
     );
@@ -394,6 +408,27 @@ mod tests {
         let back: Vec<ChainedEvent> = serde_json::from_str(&json).unwrap();
         assert_eq!(chain, back);
         assert!(verify_chain(&back, &resolver_for(device_id, vk)).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "event_type exceeds the u16 length prefix")]
+    fn an_event_type_too_long_for_its_length_prefix_panics_loudly() {
+        // Landmine: without the guard, a 65536-byte event_type would wrap
+        // its u16 length prefix to 0 and the signed bytes would become
+        // ambiguous against a differently-split event. Panicking is the
+        // contract; silently signing is the bug.
+        let device_id = DeviceId([1u8; 16]);
+        let (sk, _vk) = keypair_from_seed(0x20);
+        let event = ChainedEvent {
+            seq: 1,
+            prev_hash: GENESIS_HASH,
+            device_id,
+            event_type: "x".repeat(usize::from(u16::MAX) + 1),
+            ts: 1_700_000_000,
+            payload: vec![],
+            sig: CfSignature([0u8; 64]),
+        };
+        let _ = sign_event(&event, &sk);
     }
 
     #[test]

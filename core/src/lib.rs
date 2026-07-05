@@ -40,8 +40,8 @@ pub use household::{Household, Tier, TrustAnchor};
 pub use ids::{DeviceId, HouseholdId, RequestId};
 pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
 pub use relay_client::{
-    ApprovalMessage, Backoff, FeedEnvelope, FeedKind, RegisterRequest, RegisterResponse,
-    RelayClient, RelayClientError, RelayTransport, TransportError,
+    ApprovalMessage, Backoff, ClientState, FeedEnvelope, FeedKind, RegisterRequest,
+    RegisterResponse, RelayClient, RelayClientError, RelayTransport, TransportError,
 };
 pub use sealing::{SealError, SealedPayload};
 pub use timeanchor::{FloorStore, TimeAnchor, TimeAnchorError, TimeBeacon};

@@ -110,6 +110,15 @@ impl FeedEnvelope {
         published_at: u64,
         payload: &[u8],
     ) -> Vec<u8> {
+        // A silently-truncating length cast in a signed canonical encoding
+        // would let two different payloads share a prefix's bytes — the
+        // canonicalization-ambiguity forgery vector this repo's other
+        // encodings validate away. No real feed approaches 4 GiB; if one
+        // ever does, fail loudly instead of signing ambiguous bytes.
+        assert!(
+            payload.len() <= u32::MAX as usize,
+            "feed payload exceeds the u32 length prefix"
+        );
         let mut buf = Vec::with_capacity(FEED_DOMAIN_TAG.len() + 1 + 8 + 8 + 4 + payload.len());
         buf.extend_from_slice(FEED_DOMAIN_TAG);
         buf.push(kind.tag_byte());
@@ -321,18 +330,45 @@ impl Backoff {
     }
 }
 
-/// The client's persistent state: the pinned release verify key, the
-/// offline outbox, and the last accepted feed seq per kind. Serializable
-/// as a whole so queued events and downgrade floors survive restarts —
-/// where it's persisted is the platform's business, same as `FloorStore`.
+/// The client's persistent state: the offline outbox and the last
+/// accepted feed seq per kind. Serializable as a whole so queued events
+/// and downgrade floors survive restarts — where it's persisted is the
+/// platform's business, same as `FloorStore`.
+///
+/// The release key is deliberately **not** in here. It's pinned at
+/// construction (build/install time, per f-secrets-keymgmt) and lives
+/// only on [`RelayClient`], which has no serde impls at all — so a
+/// tampered state file can reset the downgrade floors at worst (and only
+/// back to accepting *genuinely release-signed* older feeds); it cannot
+/// swap feed trust to a different key. Redteam note for the state file's
+/// other contents: the floors and outbox are integrity-protected by
+/// svc-integrity's store, not by this crate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RelayClient {
+pub struct ClientState {
     pub version: SchemaVersion,
-    release_key: Ed25519PublicKey,
     outbox: VecDeque<ChainedEvent>,
     last_blocklist_seq: Option<u64>,
     last_doh_seq: Option<u64>,
+}
+
+impl ClientState {
+    fn empty() -> Self {
+        Self {
+            version: SchemaVersion::CURRENT,
+            outbox: VecDeque::new(),
+            last_blocklist_seq: None,
+            last_doh_seq: None,
+        }
+    }
+}
+
+/// The client: pinned release key + [`ClientState`]. Deliberately not
+/// serializable — see [`ClientState`] for the split's rationale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayClient {
+    release_key: Ed25519PublicKey,
+    state: ClientState,
 }
 
 impl RelayClient {
@@ -340,12 +376,21 @@ impl RelayClient {
     /// (f-secrets-keymgmt) — feed trust derives from it and nothing else.
     pub fn new(release_key: Ed25519PublicKey) -> Self {
         Self {
-            version: SchemaVersion::CURRENT,
             release_key,
-            outbox: VecDeque::new(),
-            last_blocklist_seq: None,
-            last_doh_seq: None,
+            state: ClientState::empty(),
         }
+    }
+
+    /// Rehydrates a client from persisted state. The key comes from the
+    /// caller's pinned constant, never from the state — passing them
+    /// separately is what makes that structural.
+    pub fn from_state(release_key: Ed25519PublicKey, state: ClientState) -> Self {
+        Self { release_key, state }
+    }
+
+    /// The state to persist. Snapshot after any mutating call.
+    pub fn state(&self) -> &ClientState {
+        &self.state
     }
 
     /// Registers this device against a pairing code and sanity-checks the
@@ -390,11 +435,11 @@ impl RelayClient {
     /// Chaining and signing stay with core-hashchain's callers — by the
     /// time an event reaches the outbox its bytes are final.
     pub fn enqueue(&mut self, event: ChainedEvent) {
-        self.outbox.push_back(event);
+        self.state.outbox.push_back(event);
     }
 
     pub fn outbox_len(&self) -> usize {
-        self.outbox.len()
+        self.state.outbox.len()
     }
 
     /// Sends queued events oldest-first. Stops at the first failure,
@@ -408,10 +453,10 @@ impl RelayClient {
         household: &HouseholdId,
     ) -> Result<usize, RelayClientError> {
         let mut sent = 0;
-        while let Some(event) = self.outbox.front() {
+        while let Some(event) = self.state.outbox.front() {
             match transport.push_event(household, event) {
                 Ok(()) => {
-                    self.outbox.pop_front();
+                    self.state.outbox.pop_front();
                     sent += 1;
                 }
                 Err(cause) => {
@@ -470,15 +515,15 @@ impl RelayClient {
 
     pub fn last_accepted_seq(&self, kind: FeedKind) -> Option<u64> {
         match kind {
-            FeedKind::Blocklist => self.last_blocklist_seq,
-            FeedKind::DohEndpoints => self.last_doh_seq,
+            FeedKind::Blocklist => self.state.last_blocklist_seq,
+            FeedKind::DohEndpoints => self.state.last_doh_seq,
         }
     }
 
     fn seq_slot(&mut self, kind: FeedKind) -> &mut Option<u64> {
         match kind {
-            FeedKind::Blocklist => &mut self.last_blocklist_seq,
-            FeedKind::DohEndpoints => &mut self.last_doh_seq,
+            FeedKind::Blocklist => &mut self.state.last_blocklist_seq,
+            FeedKind::DohEndpoints => &mut self.state.last_doh_seq,
         }
     }
 
@@ -1055,8 +1100,10 @@ mod tests {
         c.enqueue(signed_event(1));
         c.enqueue(signed_event(2));
 
-        let json = serde_json::to_string(&c).unwrap();
-        let mut restored: RelayClient = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(c.state()).unwrap();
+        let state: ClientState = serde_json::from_str(&json).unwrap();
+        let (_, release_vk) = release_keys();
+        let mut restored = RelayClient::from_state(release_vk, state);
         assert_eq!(restored, c);
 
         // The restored client keeps its downgrade floor...
@@ -1075,13 +1122,44 @@ mod tests {
     #[test]
     fn unknown_fields_on_persisted_client_state_are_rejected() {
         let c = client();
-        let mut value = serde_json::to_value(&c).unwrap();
+        let mut value = serde_json::to_value(c.state()).unwrap();
         value
             .as_object_mut()
             .unwrap()
             .insert("smuggled".into(), serde_json::json!("payload"));
-        let result: Result<RelayClient, _> = serde_json::from_value(value);
+        let result: Result<ClientState, _> = serde_json::from_value(value);
         assert!(result.is_err(), "unknown field should be rejected");
+    }
+
+    #[test]
+    fn persisted_state_carries_no_key_material() {
+        // Landmine: the release key is pinned at construction and must
+        // never ride along in the state file — a tampered file may at
+        // worst reset the downgrade floors (back to accepting genuinely
+        // release-signed older feeds); it must not be able to swap feed
+        // trust to a different key. Pins the exact persisted shape so a
+        // "convenient" field addition has to delete this test.
+        let value = serde_json::to_value(client().state()).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["last_blocklist_seq", "last_doh_seq", "outbox", "version"]
+        );
+    }
+
+    #[test]
+    fn feed_kind_tag_bytes_are_pinned() {
+        // Landmine: these bytes are inside every release-signed feed's
+        // canonical encoding. Reordering the enum or renumbering tag_byte
+        // would silently invalidate every feed the offline pipeline ever
+        // signed — the KAT covers Blocklist; this pins both.
+        assert_eq!(FeedKind::Blocklist.tag_byte(), 1);
+        assert_eq!(FeedKind::DohEndpoints.tag_byte(), 2);
     }
 
     // --- known-answer vector ---------------------------------------------------
