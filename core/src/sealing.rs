@@ -103,7 +103,7 @@ mod tests {
         let (sk, pk) = keypair_from_seed(0x11);
         let plaintext = b"https://example.com/reason=homework";
         let sealed = seal(&pk, plaintext).unwrap();
-        let opened = open(sk.as_bytes(), &sealed).unwrap();
+        let opened = open(&sk.to_bytes(), &sealed).unwrap();
         assert_eq!(opened, plaintext);
     }
 
@@ -113,7 +113,7 @@ mod tests {
         let (wrong_sk, _wrong_pk) = keypair_from_seed(0x22);
         let sealed = seal(&pk, b"secret domain").unwrap();
         assert_eq!(
-            open(wrong_sk.as_bytes(), &sealed),
+            open(&wrong_sk.to_bytes(), &sealed),
             Err(SealError::DecryptionFailed)
         );
     }
@@ -125,7 +125,7 @@ mod tests {
         let last = sealed.0.len() - 1;
         sealed.0[last] ^= 0x01; // flip a bit in the authentication tag
         assert_eq!(
-            open(sk.as_bytes(), &sealed),
+            open(&sk.to_bytes(), &sealed),
             Err(SealError::DecryptionFailed)
         );
     }
@@ -140,7 +140,7 @@ mod tests {
         let mut sealed = seal(&pk, b"secret domain").unwrap();
         sealed.0[0] ^= 0x01;
         assert_eq!(
-            open(sk.as_bytes(), &sealed),
+            open(&sk.to_bytes(), &sealed),
             Err(SealError::DecryptionFailed)
         );
     }
@@ -222,7 +222,7 @@ mod tests {
             );
         }
         let sealed_bytes = crate::hex::decode_any(pinned_ciphertext_hex).unwrap();
-        let opened = open(sk.as_bytes(), &SealedPayload(sealed_bytes)).unwrap();
+        let opened = open(&sk.to_bytes(), &SealedPayload(sealed_bytes)).unwrap();
         assert_eq!(opened, b"known-answer-plaintext");
     }
 }
