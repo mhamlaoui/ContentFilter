@@ -298,7 +298,6 @@ mod tests {
         // against device A's key specifically, even if it was actually
         // signed by a different, otherwise-legitimate household device.
         let device_a = DeviceId([1u8; 16]);
-        let device_b = DeviceId([2u8; 16]);
         let (sk_a, vk_a) = keypair_from_seed(0x20);
         let (sk_b, _vk_b) = keypair_from_seed(0x30);
 
