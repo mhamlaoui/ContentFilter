@@ -1,19 +1,19 @@
 //! Shared crypto, approvals, and state logic used by the Windows service,
 //! relay, iOS, and Android clients.
 //!
-//! Data models (core-models) plus Ed25519 approval sign/verify
-//! (core-crypto-approvals). Still no randomness anywhere in this crate —
-//! Ed25519 signing is deterministic, and nothing here generates keys, ids,
-//! or nonces; those come from a hardware-backed keystore or whichever
-//! ticket first mints an id. Downstream tickets build on top:
-//! core-crypto-sealing adds X25519 sealed-box open/seal, core-weakening
-//! adds the state machine. Keeping this crate's dependency footprint
-//! minimal (`serde`, `ed25519-dalek`) is deliberate: it's the one crate
+//! Data models (core-models), Ed25519 approval sign/verify
+//! (core-crypto-approvals), and X25519 sealed-box encryption
+//! (core-crypto-sealing). Ed25519 signing is deterministic and needs no
+//! randomness; sealing does (a fresh ephemeral keypair per call), which is
+//! the one legitimate use of a CSPRNG in this crate — everything else
+//! (keys, ids, nonces) still comes from a hardware-backed keystore or
+//! whichever ticket first mints an id, never from code here. Keeping this
+//! crate's dependency footprint deliberate matters: it's the one crate
 //! every platform (Windows, relay, iOS via UniFFI, Android via UniFFI)
-//! links against, so its supply-chain surface should stay small and each
-//! addition should be individually justified — `ed25519-dalek` is, as a
-//! cryptographic primitive nobody should hand-roll; hex encoding elsewhere
-//! in this crate isn't a primitive, so it's hand-rolled instead.
+//! links against. Each addition should be individually justified —
+//! `ed25519-dalek`, `crypto_box`, `hmac`/`sha2` are, as cryptographic
+//! primitives nobody should hand-roll; hex encoding elsewhere in this
+//! crate isn't a primitive, so it's hand-rolled instead.
 
 mod hex;
 
@@ -24,6 +24,7 @@ pub mod filter_state;
 pub mod household;
 pub mod ids;
 pub mod keys;
+pub mod sealing;
 pub mod version;
 
 pub use approval::{ApprovalError, ApprovalStatement};
@@ -33,4 +34,5 @@ pub use filter_state::FilterState;
 pub use household::{Household, Tier, TrustAnchor};
 pub use ids::{DeviceId, HouseholdId, RequestId};
 pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
+pub use sealing::{SealError, SealedPayload};
 pub use version::{ModelError, SchemaVersion, SCHEMA_VERSION};

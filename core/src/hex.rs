@@ -20,8 +20,22 @@ pub(crate) fn decode_exact(s: &str, expected_len: usize) -> Result<Vec<u8>, Mode
             found: s.len() / 2,
         });
     }
+    decode_any(s)
+}
+
+/// Decodes hex without a fixed expected length, for variable-length
+/// payloads (e.g. sealed-box ciphertext, whose length depends on the
+/// plaintext). Fixed-size key/id types use [`decode_exact`] instead, since
+/// their length is itself a property worth checking.
+pub(crate) fn decode_any(s: &str) -> Result<Vec<u8>, ModelError> {
+    if !s.len().is_multiple_of(2) {
+        return Err(ModelError::InvalidLength {
+            expected: s.len() / 2 + 1,
+            found: s.len() / 2,
+        });
+    }
     let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(expected_len);
+    let mut out = Vec::with_capacity(s.len() / 2);
     for chunk in bytes.chunks_exact(2) {
         let hi = char_to_nibble(chunk[0])?;
         let lo = char_to_nibble(chunk[1])?;
