@@ -25,6 +25,7 @@ pub mod household;
 pub mod ids;
 pub mod keys;
 pub mod sealing;
+pub mod timeanchor;
 pub mod version;
 
 pub use approval::{ApprovalError, ApprovalStatement};
@@ -35,4 +36,5 @@ pub use household::{Household, Tier, TrustAnchor};
 pub use ids::{DeviceId, HouseholdId, RequestId};
 pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
 pub use sealing::{SealError, SealedPayload};
+pub use timeanchor::{FloorStore, TimeAnchor, TimeAnchorError, TimeBeacon};
 pub use version::{ModelError, SchemaVersion, SCHEMA_VERSION};
