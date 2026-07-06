@@ -39,9 +39,10 @@
 use crate::auth::{
     verify_mutating_request, AuthError, IncomingRequest, ReplayGuard, DEFAULT_MAX_SKEW_SECONDS,
 };
+use crate::feeds::FeedStore;
 use crate::registry::{DeviceSubmission, PairingCode, Registry, RegistryError, PAIRING_CODE_LEN};
 use axum::body::to_bytes;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -49,8 +50,8 @@ use axum::{Json, Router};
 use cf_core::request_auth::{body_sha256, AuthStatement, REQUEST_NONCE_LEN};
 use cf_core::timeanchor::{sign_beacon, TimeBeacon};
 use cf_core::{
-    Device, DeviceId, DeviceRole, Ed25519PublicKey, HouseholdId, Platform, RegisterRequest,
-    RegisterResponse, SchemaVersion, Signature, TrustAnchor,
+    Device, DeviceId, DeviceRole, Ed25519PublicKey, FeedKind, HouseholdId, Platform,
+    RegisterRequest, RegisterResponse, SchemaVersion, Signature, TrustAnchor,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,9 @@ pub struct AppState {
     /// Signs time beacons (relay-timeanchor). Online operational key —
     /// see `RelayConfig::beacon_key_path` for why that's acceptable.
     beacon_key: Arc<ed25519_dalek::SigningKey>,
+    /// Release-signed feeds, loaded at startup (relay-feeds). Immutable
+    /// once loaded — not inside the Mutex.
+    feed_store: Arc<FeedStore>,
 }
 
 struct Shared {
@@ -74,14 +78,15 @@ struct Shared {
 }
 
 impl AppState {
-    pub fn new(beacon_key: ed25519_dalek::SigningKey) -> Self {
+    pub fn new(services: crate::AppServices) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Shared {
                 registry: Registry::new(),
                 guard: ReplayGuard::new(DEFAULT_MAX_SKEW_SECONDS),
             })),
             rng: SystemRandom::new(),
-            beacon_key: Arc::new(beacon_key),
+            beacon_key: Arc::new(services.beacon_key),
+            feed_store: Arc::new(services.feed_store),
         }
     }
 
@@ -109,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pair", post(pair))
         .route("/v1/time/beacon", get(get_beacon))
         .route("/v1/time/key", get(get_beacon_key))
+        .route("/v1/feeds/:kind", get(get_feed))
         .with_state(state)
 }
 
@@ -325,6 +331,35 @@ async fn get_beacon_key(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct FeedQuery {
+    /// The client's last accepted feed_seq (cf-core `pull_feed` sends
+    /// it). Present and current → 304; absent → the latest is served.
+    newer_than: Option<u64>,
+}
+
+async fn get_feed(
+    State(state): State<AppState>,
+    Path(kind_str): Path<String>,
+    Query(query): Query<FeedQuery>,
+) -> Response {
+    // Kind names follow FeedKind's serde spelling.
+    let kind = match kind_str.as_str() {
+        "blocklist" => FeedKind::Blocklist,
+        "doh_endpoints" => FeedKind::DohEndpoints,
+        _ => return error_response(StatusCode::NOT_FOUND, "unknown feed kind"),
+    };
+    let Some(envelope) = state.feed_store.latest(kind) else {
+        return error_response(StatusCode::NOT_FOUND, "no feed published yet");
+    };
+    if let Some(have) = query.newer_than {
+        if envelope.feed_seq <= have {
+            return StatusCode::NOT_MODIFIED.into_response();
+        }
+    }
+    Json(envelope.clone()).into_response()
+}
+
 async fn create_household(
     State(state): State<AppState>,
     Json(request): Json<CreateHouseholdRequest>,
@@ -458,7 +493,14 @@ mod tests {
     }
 
     fn test_router() -> Router {
-        router(AppState::new(SigningKey::from_bytes(&[0xB0; 32])))
+        test_router_with_feeds(FeedStore::empty())
+    }
+
+    fn test_router_with_feeds(feed_store: FeedStore) -> Router {
+        router(AppState::new(crate::AppServices {
+            beacon_key: SigningKey::from_bytes(&[0xB0; 32]),
+            feed_store,
+        }))
     }
 
     fn founder_keys() -> (SigningKey, Ed25519PublicKey) {
@@ -706,6 +748,134 @@ mod tests {
         let (status, body) =
             send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 7).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay accepted: {body}");
+    }
+
+    // --- feeds (relay-feeds) ---------------------------------------------
+
+    fn release_keys() -> (SigningKey, Ed25519PublicKey) {
+        let sk = SigningKey::from_bytes(&[0x51; 32]);
+        let vk = Ed25519PublicKey(sk.verifying_key().to_bytes());
+        (sk, vk)
+    }
+
+    fn loaded_feed_store(seq: u64) -> FeedStore {
+        // Through the real file-loading path, not a struct literal.
+        let (release_sk, _) = release_keys();
+        let dir = tempfile::tempdir().unwrap();
+        let envelope = cf_core::relay_client::sign_feed(
+            FeedKind::Blocklist,
+            seq,
+            1_700_000_000,
+            b"blocked.example".to_vec(),
+            &release_sk,
+        );
+        std::fs::write(
+            dir.path().join("blocklist.json"),
+            serde_json::to_string(&envelope).unwrap(),
+        )
+        .unwrap();
+        FeedStore::load_dir(dir.path()).unwrap()
+    }
+
+    async fn fetch_feed_response(
+        router: &Router,
+        uri: &str,
+    ) -> (StatusCode, Option<cf_core::FeedEnvelope>) {
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let envelope = if status == StatusCode::OK {
+            Some(serde_json::from_slice(&bytes).unwrap())
+        } else {
+            None
+        };
+        (status, envelope)
+    }
+
+    #[tokio::test]
+    async fn feeds_are_served_signed_and_a_client_accepts_them_end_to_end() {
+        let router = test_router_with_feeds(loaded_feed_store(7));
+        let (status, envelope) = fetch_feed_response(&router, "/v1/feeds/blocklist").await;
+        assert_eq!(status, StatusCode::OK);
+        let envelope = envelope.unwrap();
+        assert_eq!(envelope.feed_seq, 7);
+
+        // The DoD's client half, against the served bytes: cf-core's
+        // client verifies the release signature and accepts.
+        struct Served(Option<cf_core::FeedEnvelope>);
+        impl cf_core::RelayTransport for Served {
+            fn register(
+                &mut self,
+                _: &RegisterRequest,
+            ) -> Result<RegisterResponse, cf_core::TransportError> {
+                unreachable!("feed test")
+            }
+            fn push_event(
+                &mut self,
+                _: &HouseholdId,
+                _: &cf_core::ChainedEvent,
+            ) -> Result<(), cf_core::TransportError> {
+                unreachable!("feed test")
+            }
+            fn fetch_feed(
+                &mut self,
+                _: FeedKind,
+                _: Option<u64>,
+            ) -> Result<Option<cf_core::FeedEnvelope>, cf_core::TransportError> {
+                Ok(self.0.clone())
+            }
+            fn fetch_approvals(
+                &mut self,
+                _: &HouseholdId,
+                _: &DeviceId,
+            ) -> Result<Vec<cf_core::ApprovalMessage>, cf_core::TransportError> {
+                unreachable!("feed test")
+            }
+        }
+
+        let (_, release_vk) = release_keys();
+        let mut client = cf_core::RelayClient::new(release_vk);
+        let accepted = client
+            .pull_feed(&mut Served(Some(envelope.clone())), FeedKind::Blocklist)
+            .unwrap();
+        assert_eq!(accepted.unwrap().feed_seq, 7);
+
+        // And the other client half: a tampered envelope served over the
+        // same path is rejected by the pinned-key check.
+        let mut tampered = envelope;
+        tampered.payload = Vec::new(); // an emptied blocklist
+        let mut fresh_client = cf_core::RelayClient::new(release_vk);
+        assert_eq!(
+            fresh_client.pull_feed(&mut Served(Some(tampered)), FeedKind::Blocklist),
+            Err(cf_core::RelayClientError::FeedSignatureInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_get_returns_not_modified_when_nothing_newer() {
+        let router = test_router_with_feeds(loaded_feed_store(7));
+        let (status, _) = fetch_feed_response(&router, "/v1/feeds/blocklist?newer_than=7").await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        let (status, envelope) =
+            fetch_feed_response(&router, "/v1/feeds/blocklist?newer_than=6").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(envelope.unwrap().feed_seq, 7);
+    }
+
+    #[tokio::test]
+    async fn unpublished_and_unknown_feed_kinds_return_not_found() {
+        let router = test_router_with_feeds(loaded_feed_store(7));
+        let (status, _) = fetch_feed_response(&router, "/v1/feeds/doh_endpoints").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no DoH feed published");
+        let (status, _) = fetch_feed_response(&router, "/v1/feeds/malware").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "unknown kind");
     }
 
     // --- time beacons (relay-timeanchor) --------------------------------

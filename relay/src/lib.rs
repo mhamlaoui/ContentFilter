@@ -20,6 +20,7 @@
 //! so the plain `serve_connection` path sidesteps the issue entirely.
 
 pub mod auth;
+pub mod feeds;
 pub mod http;
 pub mod registry;
 
@@ -54,6 +55,18 @@ pub struct RelayConfig {
     /// client floors, and only signed feeds/approvals gate anything
     /// stronger). Required, like the TLS paths — no beacon-less mode.
     pub beacon_key_path: PathBuf,
+    /// Directory of release-key-signed `FeedEnvelope` JSON files
+    /// (relay-feeds). May be empty (a relay can start before the first
+    /// feed is published); must exist. See `feeds::FeedStore` for why
+    /// ingestion is a directory and not an upload endpoint.
+    pub feeds_dir: PathBuf,
+}
+
+/// Everything `app` needs beyond routing: bundled so `run_with_listener`
+/// stops growing a parameter per relay ticket.
+pub struct AppServices {
+    pub beacon_key: ed25519_dalek::SigningKey,
+    pub feed_store: feeds::FeedStore,
 }
 
 #[derive(Debug)]
@@ -89,8 +102,8 @@ async fn health() -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse { status: "ok" })
 }
 
-pub fn app(beacon_key: ed25519_dalek::SigningKey) -> Router {
-    http::router(http::AppState::new(beacon_key)).route("/healthz", axum::routing::get(health))
+pub fn app(services: AppServices) -> Router {
+    http::router(http::AppState::new(services)).route("/healthz", axum::routing::get(health))
 }
 
 /// Loads the beacon signing key: a file holding exactly 64 hex chars
@@ -148,12 +161,15 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(config.bind_addr).await?;
-    let beacon_key = load_beacon_key(&config.beacon_key_path)?;
+    let services = AppServices {
+        beacon_key: load_beacon_key(&config.beacon_key_path)?,
+        feed_store: feeds::FeedStore::load_dir(&config.feeds_dir)?,
+    };
     run_with_listener(
         listener,
         config.tls_cert_path,
         config.tls_key_path,
-        beacon_key,
+        services,
         shutdown,
     )
     .await
@@ -174,14 +190,14 @@ pub async fn run_with_listener(
     listener: TcpListener,
     tls_cert_path: PathBuf,
     tls_key_path: PathBuf,
-    beacon_key: ed25519_dalek::SigningKey,
+    services: AppServices,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let tls_config = load_tls_config(&tls_cert_path, &tls_key_path)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     tracing::info!(addr = %listener.local_addr()?, "relay starting");
 
-    let app = app(beacon_key);
+    let app = app(services);
     // A JoinSet of raw tasks isn't enough for graceful shutdown: an
     // HTTP/1.1 keep-alive connection's task doesn't finish just because we
     // stop accepting new connections — it stays open waiting for a
@@ -237,6 +253,7 @@ mod tests {
             tls_cert_path = "cert.pem"
             tls_key_path = "key.pem"
             beacon_key_path = "beacon.key"
+            feeds_dir = "feeds"
             "#,
         )
         .unwrap();
@@ -245,6 +262,24 @@ mod tests {
         assert_eq!(config.bind_addr.port(), 8443);
         assert_eq!(config.tls_cert_path, PathBuf::from("cert.pem"));
         assert_eq!(config.beacon_key_path, PathBuf::from("beacon.key"));
+        assert_eq!(config.feeds_dir, PathBuf::from("feeds"));
+    }
+
+    #[test]
+    fn config_without_a_feeds_dir_is_rejected_at_parse_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(
+            &path,
+            r#"
+            bind_addr = "127.0.0.1:8443"
+            tls_cert_path = "cert.pem"
+            tls_key_path = "key.pem"
+            beacon_key_path = "beacon.key"
+            "#,
+        )
+        .unwrap();
+        assert!(RelayConfig::load(&path).is_err());
     }
 
     #[test]
@@ -259,6 +294,7 @@ mod tests {
             bind_addr = "127.0.0.1:8443"
             tls_cert_path = "cert.pem"
             tls_key_path = "key.pem"
+            feeds_dir = "feeds"
             "#,
         )
         .unwrap();

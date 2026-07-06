@@ -29,8 +29,11 @@ async fn bound_loopback_listener() -> (TcpListener, std::net::SocketAddr) {
     (listener, addr)
 }
 
-fn test_beacon_key() -> ed25519_dalek::SigningKey {
-    ed25519_dalek::SigningKey::from_bytes(&[0xB0; 32])
+fn test_services() -> cf_relay::AppServices {
+    cf_relay::AppServices {
+        beacon_key: ed25519_dalek::SigningKey::from_bytes(&[0xB0; 32]),
+        feed_store: cf_relay::feeds::FeedStore::empty(),
+    }
 }
 
 fn trusting_reqwest_client(cert_pem_path: &std::path::Path) -> reqwest::Client {
@@ -54,7 +57,7 @@ async fn health_check_returns_200_over_tls() {
         listener,
         cert_path.clone(),
         key_path.clone(),
-        test_beacon_key(),
+        test_services(),
         async {
             let _ = shutdown_rx.await;
         },
@@ -94,7 +97,7 @@ async fn plaintext_http_is_refused_not_served() {
         listener,
         cert_path.clone(),
         key_path.clone(),
-        test_beacon_key(),
+        test_services(),
         async {
             let _ = shutdown_rx.await;
         },
@@ -160,7 +163,7 @@ async fn shutdown_does_not_hang_on_an_idle_keepalive_connection() {
         listener,
         cert_path.clone(),
         key_path.clone(),
-        test_beacon_key(),
+        test_services(),
         async {
             let _ = shutdown_rx.await;
         },
