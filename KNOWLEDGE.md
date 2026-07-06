@@ -27,6 +27,8 @@
 - [2026-07-06] [source: claude-code] Verify multi-line KAT hex literals against the CI-printed value PROGRAMMATICALLY before pushing (regex the literal out of the source, strip continuations, compare) — an eyeballed 4-line split was off by three characters. Cheap script, saves a whole CI round-trip.
 - [2026-07-06] [source: claude-code] Beacon design (relay-timeanchor): seq = utc gives restart-safe monotonicity with zero storage; relay clock rollback stalls floors (safe) instead of corrupting them; never sign future time — `floor ≤ real-now` is a property core-weakening's grant timestamps depend on. Key tiering: online operational keys (beacon) vs offline release key — an air-gapped key cannot attest time; bound the blast radius instead and pin verify keys at install, never trust-on-fetch.
 - [2026-07-06] [source: claude-code] Don't give state types holding key material a Default impl — an implicitly-minted key in production is a key nobody provisioned or pinned. Constructors take the key explicitly; tests build their own.
+- [2026-07-06] [source: claude-code] The relay never verifies feed signatures (relay-feeds): an untrusted middlebox verifying content it can't be trusted about adds a second pinned key that can drift, for zero security — clients verify against their own pin regardless. Validate at PUBLISH time instead. Corollary: corrupt inputs at the trust boundary fail loudly at startup (naming the file), never skip-and-continue.
+- [2026-07-06] [source: claude-code] cf-relay dependency promotions so far (dev → full): ed25519-dalek (beacon signing), serde_json (feed files) — when test-only usage becomes production surface, move the dep the same commit, don't let it ride.
 
 ## Framework Intel (Rust/Windows/CI gotchas)
 

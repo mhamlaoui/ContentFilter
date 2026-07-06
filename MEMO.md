@@ -336,6 +336,21 @@ truth.
     movement. `ed25519-dalek` promoted to a full cf-relay dependency;
     `AppState::Default` removed (an implicit beacon key in prod would be
     a key nobody pinned).
+- `relay-feeds` (#32, closed): commit `df90951`, first-round-trip green
+  (https://github.com/mhamlaoui/ContentFilter/actions/runs/28787720432).
+  - The relay serves, never signs: offline-signed FeedEnvelope JSON
+    files load from `RelayConfig::feeds_dir` (required; may be empty) at
+    startup, highest seq per kind kept; `GET /v1/feeds/{kind}
+    ?newer_than=N` → 200 / 304 / 404.
+  - Rejected: relay-side signature verification (second pinned copy of
+    the release key that can drift, zero security gain — clients verify
+    regardless; publish-time validation is #76's) and an authenticated
+    upload endpoint (new authz class duplicating scp + restart). Corrupt
+    feed files fail startup loudly, naming the file.
+  - DoD's client rows proven against served bytes via cf-core's real
+    RelayClient (accept valid, reject tampered). `serde_json` promoted
+    to full dependency; `AppServices` bundle introduced for
+    run_with_listener.
 
 ---
 
@@ -356,9 +371,11 @@ truth.
 - ~~`relay-auth`~~ — done (#29 closed, `8e4b978` + `6179400`)
 - ~~`relay-registry-pairing`~~ — done (#30 closed, `22515f7` + `52bc1b6`)
 - ~~`relay-timeanchor`~~ — done (#33 closed, `a9e8e59`)
-- `relay-log` (#31), `relay-feeds` (#32), `relay-heartbeat-silence` (#34) —
-  unblocked by #30; their cf-core halves (hashchain, feed envelope)
-  already exist.
+- ~~`relay-feeds`~~ — done (#32 closed, `df90951`)
+- `relay-log` (#31) and `relay-heartbeat-silence` (#34) — unblocked by
+  #30; #31 forces the durability debate (human question pending).
+- `hard-doh-feed-ops` (#76) — newly unblocked by #32 (the feed
+  maintenance pipeline; mostly ops/tooling).
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface
   (UniFFI codegen + Swift/Kotlin build jobs) — human input requested.
