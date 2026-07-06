@@ -401,9 +401,16 @@ truth.
 - ~~`relay-heartbeat-silence`~~ — done (#34 closed, `75785ee`)
 - ~~`relay-log`~~ — done (#31 closed, `33b4bd3`; durability question
   moved to relay-deploy #38 where it belongs)
-- `relay-approvals-transport` (#35) — newly unblocked by #31; next
-  spine link (sealed/signed verdict routing; relay can't decrypt).
-- `relay-email-fallback` (#37) — newly unblocked by #31.
+- ~~`relay-approvals-transport`~~ — done (#35 closed, `1702d25` +
+  `00fe0b7`). Mailbox model (per-recipient seqs, pull w/ client floor);
+  verdict wire encoding defined here; sealed bytes routed unchanged +
+  relay-cannot-decrypt + full verdict spine proven end to end; mailbox
+  is NOT the record — the chain is (drop test); rate-limit by salted
+  request hash. CI-caught bug: sign path-AND-query, not path (query
+  params now ride inside signatures).
+- `relay-push` (#36) — unblocked by #35, but needs APNs/FCM sandbox
+  credentials — **human-gated external dependency**.
+- `relay-email-fallback` (#37) — unblocked by #31 (SMTP thinking).
 - `hard-doh-feed-ops` (#76) — unblocked by #32 (ops/tooling).
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface

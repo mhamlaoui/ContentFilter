@@ -9,30 +9,31 @@
 
 ## Active Todo List
 
-- [ ] Next ticket: `relay-approvals-transport` (#35; newly unblocked by #31) — route sealed/signed verdicts; relay carries ciphertext + signatures only, cannot decrypt (no private key) with test; approval delivered to target device; dropped message surfaces as a log gap. Design questions: wire shape for ApprovalMessage (cf-core deliberately left serde off — THIS ticket owns the encoding), sealed unblock payload routing (SealedPayload → partner), delivery = polling endpoint (fetch_approvals in RelayTransport already expects pull).
-- [ ] Then: `relay-email-fallback` (#37; unblocked by #31 — needs SMTP thinking) or `svc-skeleton` (#39).
+- [ ] Next ticket candidates: `relay-email-fallback` (#37; SMTP alert channel independent of push — design pre-work: an SmtpMailer trait seam with a real client behind it (lettre is the obvious crate — weigh it; cf-relay only), config for SMTP creds (another RelayConfig growth), retry via the existing Backoff idea, and wiring the pending_events buffer (silence/tamper/log-gap events) as the source — this is the ticket that finally DRAINS that buffer for critical events) or `svc-skeleton` (#39; Windows SCM — different risk profile, starts the e-service epic).
+- [ ] `relay-push` (#36): unblocked but **human-gated** — needs APNs/FCM sandbox credentials.
 - [ ] Still open: `core-uniffi-scaffold` (#27; **awaiting human answer**), `hard-doh-feed-ops` (#76), #21 fuzzing follow-up.
 
 ## Current Blockers
 
-- #16 offline key ceremony — **human**; #17 THREAT_MODEL sign-off — **human**; #19 blocked on #16; #20 design doc doesn't exist; #27 paused on human CI call
-- Relay durability: question moved to relay-deploy (#38) where it belongs — every relay component so far is a logic-complete in-memory seam (registry, log, silence, replay guard; feeds immutable-after-load)
+- #16 offline key ceremony — **human**; #17 THREAT_MODEL sign-off — **human**; #19 blocked on #16; #20 design doc doesn't exist; #27 paused on human CI call; #36 needs APNs/FCM creds — **human**
 - Standing: local `cargo test` broken (Smart App Control) — CI-only verification
 
 ## Session Handoff
 
-**What was done (2026-07-06, per MEMO.md):** SIX tickets closed this session: #29 (relay-auth), #30 (registry/pairing), #33 (timeanchor beacons), #32 (feeds), #34 (heartbeat-silence), #31 (event log). The last four were all first-round-trip green. Plus #26's post-close redteam hardening.
+**What was done (2026-07-06, per MEMO.md):** SEVEN tickets closed: #29, #30, #33, #32, #34, #31, #35 — the e-relay epic's entire protocol surface. Two real CI-caught bugs today (Backoff checked_shl earlier in #26's arc; sign path-and-query in #35).
 
 **Where things stand:**
-- e-relay remaining: approvals-transport (#35), push (#36), email-fallback (#37), deploy (#38). Everything else in the epic is done.
-- The relay now: enrolls households/devices, authenticates + replay-guards signed requests, attests time, serves release-signed feeds, tracks heartbeats → DeviceSilent/DeviceResumed (bounded pending-events buffer awaiting #35/#37 delivery), and stores per-device hash chains with fork/gap detection + prune-keeps-head.
-- Config surface: relay.toml requires bind_addr, tls_cert_path, tls_key_path, beacon_key_path, feeds_dir.
+- e-relay remaining: push (#36, human-gated), email-fallback (#37), deploy (#38). Everything else done.
+- The relay is now a functionally complete accountability hub: enrollment (anchor-authenticated create, pairing codes), signed+replay-guarded requests (path-and-query inside signatures), time attestation (seq=utc beacons), release-signed feed distribution (conditional GET), heartbeat→silence detection, per-device hash-chained event log (fork/gap/prune-keeps-head), and sealed/signed message routing (mailboxes, rate-limited by salted request hash).
+- In-memory seams throughout; durability lands at #38. Config: bind_addr, tls_cert_path, tls_key_path, beacon_key_path, feeds_dir.
+- The pending_events buffer (silence events) still has no consumer — #37 drains it for critical events; #36 would too.
 
 **Next steps / resume point:**
-- `relay-approvals-transport` (#35): read the issue. Key pre-work notes: ApprovalMessage wire encoding is deliberately undefined in cf-core (this ticket owns it — see #26/#29 comments); delivery should be pull-based per RelayTransport::fetch_approvals(household, device); "relay cannot decrypt (no private key) test" wants a test proving the sealed payload opens only with the partner scalar the relay never holds (cf-core sealing tests are the pattern); "dropped message surfaces downstream as a log gap" ties verdict delivery to the event log — think about whether verdicts are ALSO chained events pushed by the partner device (elegant: reuses #31 wholesale) vs a separate mailbox with its own continuity story.
+- Read #37's issue first if picking it (DoD: tamper/silence/log-gap events email out even with push disabled; path independent of relay push; delivery retried). The mailer must be a seam (no real SMTP in CI — tests assert against a recording mock; a real lettre-backed impl compiles but is exercised only in deploy).
+- Alternative: #39 svc-skeleton (Windows SCM; CI has windows-latest, service install/start/stop tests need care — read MEMO 2026-07-03 for the Smart App Control history first).
 
 **Open questions for the human:**
+- #36: provide APNs/FCM sandbox credentials when ready.
 - #27 UniFFI CI surface — yes/no?
 - THREAT_MODEL sign-off (#17); key ceremony (#16)?
 - Locked = ApprovalOnly for every weakening (#25) — still comfortable?
-- (Durability question retired from #31; will resurface at #38 with concrete needs.)
