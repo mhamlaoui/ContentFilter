@@ -1570,6 +1570,71 @@ mod tests {
         assert!(due[0].0.body.contains("seq gap"));
     }
 
+    #[tokio::test]
+    async fn a_device_pushed_tamper_event_emails_out() {
+        // The third leg of the DoD row: a device chains a TamperDetected
+        // event; the relay can't see into the payload, but the chained
+        // event_type string is the wire contract, and matching it queues
+        // the alert. Duplicates (lost-ack retries) must not re-alert.
+        use cf_core::hashchain::GENESIS_HASH;
+
+        let mailer = Arc::new(RecordingMailer(std::sync::Mutex::new(Vec::new())));
+        let state = test_state_with(FeedStore::empty(), mailer.clone());
+        let router = router(state.clone());
+
+        let (status, body) = send_json(&router, "POST", "/v1/households", create_body()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let household_hex = body["anchor"]["household_id"].as_str().unwrap().to_string();
+        let founder_id_hex = body["device"]["id"].as_str().unwrap().to_string();
+        let (founder_sk, _) = founder_keys();
+
+        let path = format!("/v1/households/{household_hex}/contact-email");
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            contact_email_body("p@example.com", 7),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let founder_id = DeviceId::from_hex(&founder_id_hex).unwrap();
+        let mut tamper = signed_chain_event(founder_id, &founder_sk, 1, GENESIS_HASH, "nrpt");
+        tamper.event_type = "tamper_detected".into();
+        tamper.sig = cf_core::hashchain::sign_event(&tamper, &founder_sk);
+        let events_path = format!("/v1/households/{household_hex}/events");
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            81,
+            serde_json::to_vec(&tamper).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The lost-ack duplicate: accepted, but no second alert.
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            82,
+            serde_json::to_vec(&tamper).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut shared = state.inner.lock().unwrap();
+        let due = shared.outbox.take_due(unix_now() + 1);
+        assert_eq!(due.len(), 1, "one alert, not one per retry");
+        assert!(due[0].0.subject.contains("tamper_detected"));
+        assert_eq!(due[0].0.to, "p@example.com");
+    }
+
     // --- approvals transport (relay-approvals-transport) -------------------
 
     /// Pairs a partner device (with a seal key) into the founded
