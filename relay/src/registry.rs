@@ -39,12 +39,19 @@
 //! requires the anchor's `partner_approval_key`, which a mislabeled
 //! device does not hold. The label is bookkeeping for humans.
 
+use cf_core::approval::{self, ApprovalStatement};
 use cf_core::{
     AnchorError, Device, DeviceId, DeviceKeyResolver, DeviceRole, Ed25519PublicKey, HouseholdId,
-    Platform, SchemaVersion, TrustAnchor,
+    Platform, SchemaVersion, Signature, TrustAnchor,
 };
 use std::collections::HashMap;
 use std::fmt;
+
+/// `ApprovalStatement::action` for authorizing the alert-email address.
+/// The statement's `request_id` is the zero sentinel — there is no
+/// weakening request behind this action; the domain separation comes from
+/// the action string.
+pub const SET_CONTACT_EMAIL_ACTION: &str = "set_contact_email";
 
 /// Pairing codes die after 15 minutes. Long enough to read a code off one
 /// screen and type it into another; short enough that a leaked code is
@@ -83,6 +90,10 @@ pub enum RegistryError {
     /// The issuing device isn't a member of the household it's issuing
     /// a code for.
     NotAMember,
+    /// A partner-key-signed statement (e.g. set-contact-email) failed a
+    /// non-signature check: wrong action, outside its window, replayed
+    /// nonce, malformed target.
+    InvalidStatement(&'static str),
 }
 
 impl fmt::Display for RegistryError {
@@ -101,6 +112,9 @@ impl fmt::Display for RegistryError {
             RegistryError::InvalidPairingCode => write!(f, "invalid pairing code"),
             RegistryError::DeviceIdCollision => write!(f, "device id collision"),
             RegistryError::NotAMember => write!(f, "device is not a member of this household"),
+            RegistryError::InvalidStatement(reason) => {
+                write!(f, "statement rejected: {reason}")
+            }
         }
     }
 }
@@ -119,6 +133,14 @@ pub struct DeviceSubmission {
 struct HouseholdRecord {
     anchor: TrustAnchor,
     devices: HashMap<DeviceId, Device>,
+    /// Where critical alerts email out (relay-email-fallback). Set only
+    /// under the partner approval key — see [`Registry::set_contact_email`].
+    contact_email: Option<String>,
+    /// Used set-contact-email statement nonces → their `not_after`
+    /// (evicted once stale; same retention invariant as relay-auth's
+    /// replay guard: forget a nonce only when its window can no longer
+    /// pass).
+    used_email_nonces: HashMap<[u8; approval::NONCE_LEN], u64>,
 }
 
 struct CodeRecord {
@@ -167,6 +189,8 @@ impl Registry {
         let mut record = HouseholdRecord {
             anchor,
             devices: HashMap::new(),
+            contact_email: None,
+            used_email_nonces: HashMap::new(),
         };
         let device = build_device(device_id, household_id, founder, now);
         record.devices.insert(device_id, device.clone());
@@ -291,6 +315,56 @@ impl Registry {
         self.households
             .get(household_id)
             .is_some_and(|r| r.devices.contains_key(device_id))
+    }
+
+    /// Sets the alert email — authorized by the **partner approval key**,
+    /// not by any device role. Alert redirection is precisely what a
+    /// monitored user in a weak moment wants, and roles are self-claimed
+    /// at registration; the anchor key is the only unforgeable partner
+    /// authority. The statement's action must be
+    /// [`SET_CONTACT_EMAIL_ACTION`], its target the email itself, its
+    /// window current by the relay clock, and its nonce fresh.
+    pub fn set_contact_email(
+        &mut self,
+        household_id: &HouseholdId,
+        statement: &ApprovalStatement,
+        signature: &Signature,
+        now: u64,
+    ) -> Result<(), RegistryError> {
+        let record = self
+            .households
+            .get_mut(household_id)
+            .ok_or(RegistryError::UnknownHousehold)?;
+        // Signature first, against the stored anchor's key — nothing in
+        // the statement is meaningful until it's the partner's words.
+        approval::verify(statement, signature, &record.anchor.partner_approval_key)
+            .map_err(|_| RegistryError::InvalidStatement("signature"))?;
+        if statement.household_id != *household_id {
+            return Err(RegistryError::InvalidStatement("household"));
+        }
+        if statement.action != SET_CONTACT_EMAIL_ACTION {
+            return Err(RegistryError::InvalidStatement("action"));
+        }
+        if !statement.target.contains('@') {
+            return Err(RegistryError::InvalidStatement("email shape"));
+        }
+        if now < statement.not_before || now > statement.not_after {
+            return Err(RegistryError::InvalidStatement("window"));
+        }
+        record.used_email_nonces.retain(|_, na| *na >= now);
+        if record.used_email_nonces.contains_key(&statement.nonce) {
+            return Err(RegistryError::InvalidStatement("nonce reused"));
+        }
+        record
+            .used_email_nonces
+            .insert(statement.nonce, statement.not_after);
+        record.contact_email = Some(statement.target.clone());
+        Ok(())
+    }
+
+    /// The household's alert email, if the partner has set one.
+    pub fn contact_email(&self, household_id: &HouseholdId) -> Option<&str> {
+        self.households.get(household_id)?.contact_email.as_deref()
     }
 
     /// The household a registered device belongs to — the subject lookup

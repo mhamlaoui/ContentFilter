@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "cf-relay"
 path = "src/main.rs"
 
+[features]
+default = ["smtp"]
+smtp = ["dep:lettre"]
+
 [lints]
 workspace = true
 
@@ -31,6 +35,14 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 # Beacon signing (relay-timeanchor); same dalek cf-core already uses.
 ed25519-dalek = "2"
+# The independent SMTP alert channel (relay-email-fallback). rustls
+# flavor to keep the no-C-toolchain build (see the rustls note above).
+# Optional + default-on: lettre's idna chain pulls icu_*_data crates whose
+# build scripts Smart App Control blocks on the dev machine, so local dev
+# builds use --no-default-features; CI and releases (default features)
+# always compile the real transport, and a binary built without it
+# REFUSES to start (see run()) rather than running email-less.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder"], optional = true }
 # Pairing codes and relay-minted ids need a CSPRNG; ring is already the
 # rustls crypto backend in this graph, so this adds no new compiled code.
 ring = "0.17"

@@ -39,6 +39,10 @@
 use crate::auth::{
     verify_mutating_request, AuthError, IncomingRequest, ReplayGuard, DEFAULT_MAX_SKEW_SECONDS,
 };
+use crate::email::{
+    email_for_chained_event, email_for_event, email_for_log_anomaly, is_critical, EmailOutbox,
+    Mailer, CRITICAL_EVENT_TYPES,
+};
 use crate::feeds::FeedStore;
 use crate::log::{AppendOutcome, EventLog, LogError};
 use crate::mailbox::{MailboxError, MailboxStore};
@@ -73,6 +77,8 @@ pub struct AppState {
     /// Release-signed feeds, loaded at startup (relay-feeds). Immutable
     /// once loaded — not inside the Mutex.
     feed_store: Arc<FeedStore>,
+    /// The independent alert channel's transport (relay-email-fallback).
+    mailer: Arc<dyn Mailer>,
 }
 
 /// Pending-notification cap. This buffer is a loudly-documented stand-in
@@ -88,22 +94,34 @@ struct Shared {
     silence: SilenceTracker,
     log: EventLog,
     mailbox: MailboxStore,
+    outbox: EmailOutbox,
     pending_events: std::collections::VecDeque<NotificationEvent>,
 }
 
 impl Shared {
-    fn push_event(&mut self, event: NotificationEvent) {
+    fn push_event(&mut self, event: NotificationEvent, now: u64) {
         if self.pending_events.len() == MAX_PENDING_EVENTS {
             tracing::warn!("pending-event buffer full; dropping the oldest event");
             self.pending_events.pop_front();
         }
         tracing::info!(kind = ?event.kind, device = ?event.device_id, "notification event");
+        // The independent email channel (relay-email-fallback): critical
+        // events go straight to the outbox here, at the point of
+        // detection — no push machinery anywhere on this path.
+        if is_critical(&event.kind) {
+            if let Some(to) = self.registry.contact_email(&event.household_id) {
+                let mail = email_for_event(to, &event);
+                self.outbox.enqueue(mail, now);
+            } else {
+                tracing::warn!("critical event with no contact email configured");
+            }
+        }
         self.pending_events.push_back(event);
     }
 
     fn record_liveness(&mut self, household_id: HouseholdId, device_id: DeviceId, now: u64) {
         if let Some(resumed) = self.silence.record_heartbeat(household_id, device_id, now) {
-            self.push_event(resumed);
+            self.push_event(resumed, now);
         }
     }
 }
@@ -117,28 +135,56 @@ impl AppState {
                 silence: SilenceTracker::new(DEFAULT_SILENCE_THRESHOLD_SECONDS),
                 log: EventLog::new(),
                 mailbox: MailboxStore::new(),
+                outbox: EmailOutbox::new(),
                 pending_events: std::collections::VecDeque::new(),
             })),
             rng: SystemRandom::new(),
             beacon_key: Arc::new(services.beacon_key),
             feed_store: Arc::new(services.feed_store),
+            mailer: services.mailer,
         }
     }
 
-    /// Spawns the periodic silence sweep. Called from `app()` (under the
-    /// server runtime), deliberately not from `router()` — endpoint tests
-    /// drive `SilenceTracker` directly with a controlled clock instead.
-    pub(crate) fn spawn_silence_sweeper(&self) {
+    /// Spawns the periodic silence sweep and the email pump. Called from
+    /// `app()` (under the server runtime), deliberately not from
+    /// `router()` — endpoint tests drive the trackers directly with a
+    /// controlled clock instead.
+    pub(crate) fn spawn_background_tasks(&self) {
         let state = self.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 interval.tick().await;
                 let now = unix_now();
-                let mut shared = state.inner.lock().expect("registry lock poisoned");
-                let events = shared.silence.sweep(now);
-                for event in events {
-                    shared.push_event(event);
+                // Short lock: sweep silence and take due emails out.
+                let due = {
+                    let mut shared = state.inner.lock().expect("registry lock poisoned");
+                    let events = shared.silence.sweep(now);
+                    for event in events {
+                        shared.push_event(event, now);
+                    }
+                    shared.outbox.take_due(now)
+                };
+                if due.is_empty() {
+                    continue;
+                }
+                // SMTP happens outside the lock, on the blocking pool.
+                let mailer = state.mailer.clone();
+                let failed = tokio::task::spawn_blocking(move || {
+                    let mut failed = Vec::new();
+                    for (mail, attempts) in due {
+                        if let Err(e) = mailer.send(&mail) {
+                            tracing::warn!(error = %e, to = %mail.to, "alert email failed");
+                            failed.push((mail, attempts));
+                        }
+                    }
+                    failed
+                })
+                .await
+                .unwrap_or_default();
+                if !failed.is_empty() {
+                    let mut shared = state.inner.lock().expect("registry lock poisoned");
+                    shared.outbox.requeue_failed(failed, unix_now());
                 }
             }
         });
@@ -174,6 +220,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/households/:household/log/:device", get(get_device_log))
         .route("/v1/households/:household/messages", post(send_message))
         .route("/v1/households/:household/mailbox", get(fetch_mailbox))
+        .route(
+            "/v1/households/:household/contact-email",
+            post(set_contact_email),
+        )
         .with_state(state)
 }
 
@@ -288,6 +338,7 @@ fn registry_error_response(e: RegistryError) -> Response {
         RegistryError::UnknownHousehold => StatusCode::NOT_FOUND,
         RegistryError::NotAMember => StatusCode::FORBIDDEN,
         RegistryError::DeviceIdCollision => StatusCode::INTERNAL_SERVER_ERROR,
+        RegistryError::InvalidStatement(_) => StatusCode::UNAUTHORIZED,
     };
     error_response(status, e.to_string())
 }
@@ -513,13 +564,112 @@ async fn push_event(
     // Pushing events is also a liveness signal — a device whose outbox is
     // draining is not silent.
     shared.record_liveness(household_id, device_id, now);
+    let event_type = event.event_type.clone();
+    let event_ts = event.ts;
     // append needs &Registry (the key resolver) and &mut EventLog out of
     // the same &mut Shared — a destructuring split borrow provides both.
-    let Shared { registry, log, .. } = &mut *shared;
+    let Shared {
+        registry,
+        log,
+        outbox,
+        ..
+    } = &mut *shared;
     match log.append(household_id, event, &*registry) {
-        Ok(AppendOutcome::Appended) => StatusCode::CREATED.into_response(),
-        Ok(AppendOutcome::Duplicate) => StatusCode::OK.into_response(),
-        Err(e) => log_error_response(e),
+        Ok(outcome) => {
+            // Device-originated criticals: the event_type string is the
+            // wire contract (payloads are opaque here). Only a fresh
+            // append alerts — duplicates are lost-ack retries.
+            if outcome == AppendOutcome::Appended
+                && CRITICAL_EVENT_TYPES.contains(&event_type.as_str())
+            {
+                if let Some(to) = registry.contact_email(&household_id) {
+                    outbox.enqueue(
+                        email_for_chained_event(to, &device_id.to_hex(), &event_type, event_ts),
+                        now,
+                    );
+                }
+            }
+            match outcome {
+                AppendOutcome::Appended => StatusCode::CREATED.into_response(),
+                AppendOutcome::Duplicate => StatusCode::OK.into_response(),
+            }
+        }
+        Err(e) => {
+            // Gaps, forks, and broken links are the withheld/rewritten-
+            // history signals (THREAT_MODEL row 3) — they alert over the
+            // independent channel too.
+            if matches!(
+                e,
+                LogError::SeqGap { .. } | LogError::Fork { .. } | LogError::BrokenLink { .. }
+            ) {
+                if let Some(to) = registry.contact_email(&household_id) {
+                    outbox.enqueue(
+                        email_for_log_anomaly(to, &device_id.to_hex(), &e.to_string(), now),
+                        now,
+                    );
+                }
+            }
+            log_error_response(e)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetContactEmailRequest {
+    pub version: SchemaVersion,
+    pub email: String,
+    pub not_before: u64,
+    pub not_after: u64,
+    /// Hex of the statement's 24-byte nonce.
+    pub nonce: String,
+    /// Hex Ed25519 signature by the **partner approval key** over the
+    /// reconstructed statement — role labels don't authorize this;
+    /// redirecting alerts is exactly the weak-moment move.
+    pub signature: String,
+}
+
+/// Sets the household's alert email. Unauthenticated at the transport
+/// level, like household creation: the partner-key-signed statement IS
+/// the authorization, and the registry enforces window + nonce freshness.
+async fn set_contact_email(
+    State(state): State<AppState>,
+    Path(household_hex): Path<String>,
+    Json(request): Json<SetContactEmailRequest>,
+) -> Response {
+    let Ok(household_id) = HouseholdId::from_hex(&household_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "household not found");
+    };
+    if request.version.check().is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "unsupported schema version");
+    }
+    let Some(nonce) = hex_decode::<{ cf_core::approval::NONCE_LEN }>(&request.nonce) else {
+        return error_response(StatusCode::BAD_REQUEST, "nonce is not 24 hex bytes");
+    };
+    let Ok(signature) = Signature::from_hex(&request.signature) else {
+        return error_response(StatusCode::BAD_REQUEST, "malformed signature");
+    };
+    // request_id is the zero sentinel — no weakening request backs this
+    // action; the action string is the domain separation.
+    let Ok(statement) = cf_core::approval::ApprovalStatement::new(
+        household_id,
+        RequestId([0u8; 16]),
+        crate::registry::SET_CONTACT_EMAIL_ACTION,
+        request.email.clone(),
+        request.not_before,
+        request.not_after,
+        nonce,
+    ) else {
+        return error_response(StatusCode::BAD_REQUEST, "malformed statement fields");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    match shared
+        .registry
+        .set_contact_email(&household_id, &statement, &signature, now)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => registry_error_response(e),
     }
 }
 
@@ -950,10 +1100,18 @@ mod tests {
     }
 
     fn test_router_with_feeds(feed_store: FeedStore) -> Router {
-        router(AppState::new(crate::AppServices {
+        router(test_state_with(
+            feed_store,
+            Arc::new(crate::email::NoopMailer),
+        ))
+    }
+
+    fn test_state_with(feed_store: FeedStore, mailer: Arc<dyn Mailer>) -> AppState {
+        AppState::new(crate::AppServices {
             beacon_key: SigningKey::from_bytes(&[0xB0; 32]),
             feed_store,
-        }))
+            mailer,
+        })
     }
 
     fn founder_keys() -> (SigningKey, Ed25519PublicKey) {
@@ -1201,6 +1359,215 @@ mod tests {
         let (status, body) =
             send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 7).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay accepted: {body}");
+    }
+
+    // --- the independent email channel (relay-email-fallback) --------------
+
+    struct RecordingMailer(std::sync::Mutex<Vec<crate::email::OutgoingEmail>>);
+
+    impl Mailer for RecordingMailer {
+        fn send(&self, email: &crate::email::OutgoingEmail) -> Result<(), String> {
+            self.0.lock().unwrap().push(email.clone());
+            Ok(())
+        }
+    }
+
+    fn contact_email_body(email: &str, nonce_byte: u8) -> serde_json::Value {
+        use cf_core::approval::{ApprovalStatement, NONCE_LEN};
+        let (partner_sk, _) = partner_keys(); // the anchor's approval key
+        let now = unix_now();
+        let nonce = [nonce_byte; NONCE_LEN];
+        let statement = ApprovalStatement::new(
+            HouseholdId([4u8; 16]),
+            RequestId([0u8; 16]),
+            crate::registry::SET_CONTACT_EMAIL_ACTION,
+            email,
+            now - 60,
+            now + 3600,
+            nonce,
+        )
+        .unwrap();
+        let signature = cf_core::approval::sign(&statement, &partner_sk).unwrap();
+        serde_json::json!({
+            "version": 1,
+            "email": email,
+            "not_before": statement.not_before,
+            "not_after": statement.not_after,
+            "nonce": hex_encode(&nonce),
+            "signature": signature.to_hex(),
+        })
+    }
+
+    #[tokio::test]
+    async fn only_the_partner_approval_key_can_set_the_alert_email() {
+        let (router, household_hex, _) = founded_router().await;
+        let path = format!("/v1/households/{household_hex}/contact-email");
+
+        // Valid: signed by the anchor's approval key.
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            contact_email_body("p@example.com", 1),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Replayed statement (same nonce): refused — an old authorization
+        // must not re-point alerts later.
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            contact_email_body("p@example.com", 1),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Signed by any other key — including a device that registered
+        // itself with role "partner": role labels don't authorize this.
+        use cf_core::approval::{ApprovalStatement, NONCE_LEN};
+        let imposter = SigningKey::from_bytes(&[0x99; 32]);
+        let now = unix_now();
+        let statement = ApprovalStatement::new(
+            HouseholdId([4u8; 16]),
+            RequestId([0u8; 16]),
+            crate::registry::SET_CONTACT_EMAIL_ACTION,
+            "attacker@example.com",
+            now - 60,
+            now + 3600,
+            [2u8; NONCE_LEN],
+        )
+        .unwrap();
+        let signature = cf_core::approval::sign(&statement, &imposter).unwrap();
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            serde_json::json!({
+                "version": 1,
+                "email": "attacker@example.com",
+                "not_before": statement.not_before,
+                "not_after": statement.not_after,
+                "nonce": hex_encode(&statement.nonce),
+                "signature": signature.to_hex(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn critical_events_email_out_with_retry_and_no_push_involvement() {
+        // The DoD rows, driven at the state layer (time can't be advanced
+        // over HTTP): a silence event lands in the email outbox at the
+        // point of detection — there IS no push machinery on this path
+        // (relay-push doesn't exist yet, and this channel won't use it
+        // when it does) — and a failed send retries until it succeeds.
+        use crate::silence::DEFAULT_SILENCE_THRESHOLD_SECONDS;
+
+        let mailer = Arc::new(RecordingMailer(std::sync::Mutex::new(Vec::new())));
+        let state = test_state_with(FeedStore::empty(), mailer.clone());
+        let router = router(state.clone());
+
+        let (status, body) = send_json(&router, "POST", "/v1/households", create_body()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let household_hex = body["anchor"]["household_id"].as_str().unwrap().to_string();
+        let device_hex = body["device"]["id"].as_str().unwrap().to_string();
+        let household = HouseholdId::from_hex(&household_hex).unwrap();
+        let device = DeviceId::from_hex(&device_hex).unwrap();
+
+        let path = format!("/v1/households/{household_hex}/contact-email");
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            contact_email_body("p@example.com", 5),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // The device goes dark; the sweep detects it and the dispatcher
+        // queues the alert.
+        let now = unix_now();
+        let silent_at = now + DEFAULT_SILENCE_THRESHOLD_SECONDS + 1;
+        {
+            let mut shared = state.inner.lock().unwrap();
+            shared.silence.record_heartbeat(household, device, now);
+            let events = shared.silence.sweep(silent_at);
+            assert_eq!(events.len(), 1);
+            for event in events {
+                shared.push_event(event, silent_at);
+            }
+            assert_eq!(shared.outbox.len(), 1);
+        }
+
+        // Delivery, with a retry first: attempt 1 "fails" (we requeue it
+        // by hand, as the pump does), attempt 2 succeeds via the mailer.
+        {
+            let mut shared = state.inner.lock().unwrap();
+            let due = shared.outbox.take_due(silent_at);
+            assert_eq!(due.len(), 1);
+            shared.outbox.requeue_failed(due, silent_at); // attempt 1 failed
+            assert!(shared.outbox.take_due(silent_at + 1).is_empty());
+
+            let due = shared.outbox.take_due(silent_at + 4000);
+            assert_eq!(due.len(), 1, "retried after backoff");
+            for (mail, _) in due {
+                state.mailer.send(&mail).unwrap();
+            }
+        }
+        let sent = mailer.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].subject.contains("device_silent"));
+        assert_eq!(sent[0].to, "p@example.com");
+    }
+
+    #[tokio::test]
+    async fn a_log_gap_emails_out_over_the_independent_channel() {
+        use cf_core::hashchain::GENESIS_HASH;
+
+        let mailer = Arc::new(RecordingMailer(std::sync::Mutex::new(Vec::new())));
+        let state = test_state_with(FeedStore::empty(), mailer.clone());
+        let router = router(state.clone());
+
+        let (status, body) = send_json(&router, "POST", "/v1/households", create_body()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let household_hex = body["anchor"]["household_id"].as_str().unwrap().to_string();
+        let founder_id_hex = body["device"]["id"].as_str().unwrap().to_string();
+        let (founder_sk, _) = founder_keys();
+
+        let path = format!("/v1/households/{household_hex}/contact-email");
+        let (status, _) = send_json(
+            &router,
+            "POST",
+            &path,
+            contact_email_body("p@example.com", 6),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A gapped append (seq 5 with nothing before it): rejected AND the
+        // anomaly is queued for email.
+        let founder_id = DeviceId::from_hex(&founder_id_hex).unwrap();
+        let gapped = signed_chain_event(founder_id, &founder_sk, 5, GENESIS_HASH, "p5");
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &format!("/v1/households/{household_hex}/events"),
+            &founder_id_hex,
+            &founder_sk,
+            71,
+            serde_json::to_vec(&gapped).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let mut shared = state.inner.lock().unwrap();
+        let due = shared.outbox.take_due(unix_now() + 1);
+        assert_eq!(due.len(), 1);
+        assert!(due[0].0.subject.contains("anomaly"));
+        assert!(due[0].0.body.contains("seq gap"));
     }
 
     // --- approvals transport (relay-approvals-transport) -------------------

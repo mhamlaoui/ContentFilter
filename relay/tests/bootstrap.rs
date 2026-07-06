@@ -33,6 +33,7 @@ fn test_services() -> cf_relay::AppServices {
     cf_relay::AppServices {
         beacon_key: ed25519_dalek::SigningKey::from_bytes(&[0xB0; 32]),
         feed_store: cf_relay::feeds::FeedStore::empty(),
+        mailer: std::sync::Arc::new(cf_relay::email::NoopMailer),
     }
 }
 

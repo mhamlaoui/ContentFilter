@@ -20,6 +20,7 @@
 //! so the plain `serve_connection` path sidesteps the issue entirely.
 
 pub mod auth;
+pub mod email;
 pub mod feeds;
 pub mod http;
 pub mod log;
@@ -63,6 +64,22 @@ pub struct RelayConfig {
     /// feed is published); must exist. See `feeds::FeedStore` for why
     /// ingestion is a directory and not an upload endpoint.
     pub feeds_dir: PathBuf,
+    /// The independent alert channel (relay-email-fallback). Required —
+    /// no email-less mode, same landmine shape as TLS/beacon: the
+    /// threat model's row 20 depends on this channel existing.
+    pub smtp: SmtpConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    /// Path to a file holding the SMTP password (trimmed) — file, not
+    /// inline TOML, same handling as the beacon key.
+    pub password_path: PathBuf,
+    /// The From: address on alert emails.
+    pub from: String,
 }
 
 /// Everything `app` needs beyond routing: bundled so `run_with_listener`
@@ -70,6 +87,7 @@ pub struct RelayConfig {
 pub struct AppServices {
     pub beacon_key: ed25519_dalek::SigningKey,
     pub feed_store: feeds::FeedStore,
+    pub mailer: Arc<dyn email::Mailer>,
 }
 
 #[derive(Debug)]
@@ -110,7 +128,7 @@ async fn health() -> axum::Json<HealthResponse> {
 /// `http::router` directly (no sweeper; they drive the tracker's clock).
 pub fn app(services: AppServices) -> Router {
     let state = http::AppState::new(services);
-    state.spawn_silence_sweeper();
+    state.spawn_background_tasks();
     http::router(state).route("/healthz", axum::routing::get(health))
 }
 
@@ -168,19 +186,46 @@ pub async fn run(
     config: RelayConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let listener = TcpListener::bind(config.bind_addr).await?;
-    let services = AppServices {
-        beacon_key: load_beacon_key(&config.beacon_key_path)?,
-        feed_store: feeds::FeedStore::load_dir(&config.feeds_dir)?,
-    };
-    run_with_listener(
-        listener,
-        config.tls_cert_path,
-        config.tls_key_path,
-        services,
-        shutdown,
-    )
-    .await
+    // A relay without the alert channel must not exist in production — a
+    // no-smtp binary refuses to start rather than running email-less (the
+    // local-dev feature exists only because Smart App Control blocks
+    // lettre's icu build scripts on the dev machine; see Cargo.toml).
+    #[cfg(not(feature = "smtp"))]
+    {
+        let _ = (config, shutdown);
+        Err(std::io::Error::other(
+            "this relay was built without the `smtp` feature; production \
+             relays must be built with default features",
+        ))
+    }
+    #[cfg(feature = "smtp")]
+    {
+        let listener = TcpListener::bind(config.bind_addr).await?;
+        let smtp_password = std::fs::read_to_string(&config.smtp.password_path)?;
+        let mailer: Arc<dyn email::Mailer> = Arc::new(
+            email::SmtpMailer::new(
+                &config.smtp.host,
+                config.smtp.port,
+                &config.smtp.username,
+                smtp_password.trim(),
+                &config.smtp.from,
+            )
+            .map_err(std::io::Error::other)?,
+        );
+        let services = AppServices {
+            beacon_key: load_beacon_key(&config.beacon_key_path)?,
+            feed_store: feeds::FeedStore::load_dir(&config.feeds_dir)?,
+            mailer,
+        };
+        run_with_listener(
+            listener,
+            config.tls_cert_path,
+            config.tls_key_path,
+            services,
+            shutdown,
+        )
+        .await
+    }
 }
 
 /// Same as [`run`], but takes an already-bound listener. Lets a caller
