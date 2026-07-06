@@ -290,10 +290,17 @@ mod tests {
             signature: Signature([0u8; 64]),
         };
         anchor.signature = sign_anchor(&anchor, &sk);
-        // PENDING_CI_RUN: pinned from an actual CI run (local cargo test is
-        // blocked by Smart App Control). Tuple assert prints all values.
-        let expected_signable_hex = "PENDING_CI_RUN";
-        let expected_signature_hex = "PENDING_CI_RUN";
+        // Pinned from an actual CI run (local cargo test is blocked by
+        // Smart App Control); identical on both OSes.
+        // https://github.com/mhamlaoui/ContentFilter/actions/runs/28770924064
+        let expected_signable_hex =
+            "436f6e74656e7446696c7465722d5472757374416e63686f722d763100000111\
+            11111111111111111111111111111100000000000000032152f8d19b791d2445\
+            3242e15f2eab6cb7cffa7b6a5ed30097960e069881db12222222222222222222\
+            22222222222222222222222222222222222222222222220001518002";
+        let expected_signature_hex =
+            "922eb5d6aa2a8885dbc9a8423ae190a84972fdbfabe6eda83fc56377ff77287b\
+            47f917e433ab9f9f6f63649a564cf8d9f20f7c1dd1caceb05e2b5bffe3f36d06";
         assert_eq!(
             (
                 crate::hex::encode(&anchor.signable_bytes()),
