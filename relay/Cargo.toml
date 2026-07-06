@@ -36,6 +36,9 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+# Tests sign AuthStatements as devices would; same dalek version cf-core
+# already brings into the graph.
+ed25519-dalek = "2"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tempfile = "3"

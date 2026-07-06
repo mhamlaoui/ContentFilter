@@ -19,6 +19,8 @@
 //! around. This server doesn't need HTTP upgrades (no WebSockets here),
 //! so the plain `serve_connection` path sidesteps the issue entirely.
 
+pub mod auth;
+
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;

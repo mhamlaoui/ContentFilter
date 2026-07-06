@@ -260,6 +260,7 @@ dependencies = [
  "axum",
  "cf-core",
  "clap",
+ "ed25519-dalek",
  "hyper-util",
  "rcgen",
  "reqwest",

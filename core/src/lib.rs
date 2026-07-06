@@ -26,6 +26,7 @@ pub mod household;
 pub mod ids;
 pub mod keys;
 pub mod relay_client;
+pub mod request_auth;
 pub mod sealing;
 pub mod timeanchor;
 pub mod version;
@@ -43,6 +44,7 @@ pub use relay_client::{
     ApprovalMessage, Backoff, ClientState, FeedEnvelope, FeedKind, RegisterRequest,
     RegisterResponse, RelayClient, RelayClientError, RelayTransport, TransportError,
 };
+pub use request_auth::{AuthStatement, RequestAuthError, REQUEST_NONCE_LEN};
 pub use sealing::{SealError, SealedPayload};
 pub use timeanchor::{FloorStore, TimeAnchor, TimeAnchorError, TimeBeacon};
 pub use version::{ModelError, SchemaVersion, SCHEMA_VERSION};
