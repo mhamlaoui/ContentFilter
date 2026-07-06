@@ -29,6 +29,9 @@
 - [2026-07-06] [source: claude-code] Don't give state types holding key material a Default impl — an implicitly-minted key in production is a key nobody provisioned or pinned. Constructors take the key explicitly; tests build their own.
 - [2026-07-06] [source: claude-code] The relay never verifies feed signatures (relay-feeds): an untrusted middlebox verifying content it can't be trusted about adds a second pinned key that can drift, for zero security — clients verify against their own pin regardless. Validate at PUBLISH time instead. Corollary: corrupt inputs at the trust boundary fail loudly at startup (naming the file), never skip-and-continue.
 - [2026-07-06] [source: claude-code] cf-relay dependency promotions so far (dev → full): ed25519-dalek (beacon signing), serde_json (feed files) — when test-only usage becomes production surface, move the dep the same commit, don't let it ride.
+- [2026-07-06] [source: claude-code] A household transparency log must be per-DEVICE chains: offline writers cannot chain onto a shared household head (they can't know it), and per-device streams are the audit unit verify_chain walks. Server enforces contiguous seqs (stricter than the client verifier) because the outbox guarantees in-order delivery — a server-side gap = lost/withheld history, never normal.
+- [2026-07-06] [source: claude-code] Idempotent-append rule for signed logs: bit-identical resend = Duplicate (accepted; lost-ack retries are normal), same-seq-different-bytes = Fork (the rewrite signal). After pruning, neither is provable — reject with a distinct non-fork verdict rather than inventing one.
+- [2026-07-06] [source: claude-code] Named follow-up: cf-core verify_chain only walks from GENESIS; verifying a pruned suffix client-side needs a variant anchored at a remembered (hash, seq). Belongs to whichever ticket consumes the log read API (likely partner-side audit).
 
 ## Framework Intel (Rust/Windows/CI gotchas)
 

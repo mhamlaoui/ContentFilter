@@ -351,6 +351,32 @@ truth.
     RelayClient (accept valid, reject tampered). `serde_json` promoted
     to full dependency; `AppServices` bundle introduced for
     run_with_listener.
+- `relay-heartbeat-silence` (#34, closed): commit `75785ee`,
+  first-round-trip green (run 28809090335). Pure `SilenceTracker`
+  (clock injected; kill/suspend/airplane = heartbeats just stop);
+  enrollment seeds liveness; one DeviceSilent per outage (idempotent
+  sweeps), DeviceResumed clears + re-arms; `POST /v1/heartbeat` signed +
+  replay-guarded; threshold = code constant (15 min) until svc-heartbeat
+  fixes the cadence contract; events land in a bounded in-memory buffer
+  (drop-oldest, warned) — stand-in until #31 persisted + #35/#37
+  deliver; sweeper spawns in `app()`, not `router()`.
+- `relay-log` (#31, closed): commit `33b4bd3`, first-round-trip green
+  (run 28809587235). **Household log = set of per-device chains** (a
+  shared chain can't exist under offline writers; per-device streams
+  are the audit unit `verify_chain` walks). Server stricter than the
+  verifier: contiguous seqs from 1 (outbox guarantees in-order
+  delivery, so a server-side gap = lost/withheld history). Outcomes:
+  Appended / Duplicate (bit-identical resend, idempotent — lost-ack
+  retries) / Fork (same seq, different bytes) / SeqGap / BrokenLink /
+  SeqPruned (no fork verdict once bytes are gone). Prune keeps
+  head_hash/next_seq (continuity preserved, truncation visible via
+  pruned_before). HTTP: signed push (author-only, membership-checked) +
+  signed member log fetch; end-to-end test runs cf-core verify_chain
+  over HTTP-fetched bytes. cf-core: `verify_event_signature` made pub.
+  Named follow-up: client-side pruned-suffix verification needs a
+  non-genesis-anchored verify_chain variant (whoever consumes the read
+  API). Durability = relay-deploy (#38), same seam story as the
+  registry.
 
 ---
 
@@ -372,10 +398,13 @@ truth.
 - ~~`relay-registry-pairing`~~ — done (#30 closed, `22515f7` + `52bc1b6`)
 - ~~`relay-timeanchor`~~ — done (#33 closed, `a9e8e59`)
 - ~~`relay-feeds`~~ — done (#32 closed, `df90951`)
-- `relay-log` (#31) and `relay-heartbeat-silence` (#34) — unblocked by
-  #30; #31 forces the durability debate (human question pending).
-- `hard-doh-feed-ops` (#76) — newly unblocked by #32 (the feed
-  maintenance pipeline; mostly ops/tooling).
+- ~~`relay-heartbeat-silence`~~ — done (#34 closed, `75785ee`)
+- ~~`relay-log`~~ — done (#31 closed, `33b4bd3`; durability question
+  moved to relay-deploy #38 where it belongs)
+- `relay-approvals-transport` (#35) — newly unblocked by #31; next
+  spine link (sealed/signed verdict routing; relay can't decrypt).
+- `relay-email-fallback` (#37) — newly unblocked by #31.
+- `hard-doh-feed-ops` (#76) — unblocked by #32 (ops/tooling).
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface
   (UniFFI codegen + Swift/Kotlin build jobs) — human input requested.
