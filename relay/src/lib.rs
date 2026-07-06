@@ -307,6 +307,13 @@ mod tests {
             tls_key_path = "key.pem"
             beacon_key_path = "beacon.key"
             feeds_dir = "feeds"
+
+            [smtp]
+            host = "smtp.example.com"
+            port = 465
+            username = "alerts"
+            password_path = "smtp.pass"
+            from = "alerts@example.com"
             "#,
         )
         .unwrap();
@@ -316,6 +323,28 @@ mod tests {
         assert_eq!(config.tls_cert_path, PathBuf::from("cert.pem"));
         assert_eq!(config.beacon_key_path, PathBuf::from("beacon.key"));
         assert_eq!(config.feeds_dir, PathBuf::from("feeds"));
+        assert_eq!(config.smtp.host, "smtp.example.com");
+        assert_eq!(config.smtp.password_path, PathBuf::from("smtp.pass"));
+    }
+
+    #[test]
+    fn config_without_an_smtp_table_is_rejected_at_parse_time() {
+        // Same landmine shape as TLS/beacon/feeds: no Option, no default,
+        // no email-less relay config.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(
+            &path,
+            r#"
+            bind_addr = "127.0.0.1:8443"
+            tls_cert_path = "cert.pem"
+            tls_key_path = "key.pem"
+            beacon_key_path = "beacon.key"
+            feeds_dir = "feeds"
+            "#,
+        )
+        .unwrap();
+        assert!(RelayConfig::load(&path).is_err());
     }
 
     #[test]
