@@ -9,31 +9,29 @@
 
 ## Active Todo List
 
-- [ ] Next ticket candidates: `relay-email-fallback` (#37; SMTP alert channel independent of push — design pre-work: an SmtpMailer trait seam with a real client behind it (lettre is the obvious crate — weigh it; cf-relay only), config for SMTP creds (another RelayConfig growth), retry via the existing Backoff idea, and wiring the pending_events buffer (silence/tamper/log-gap events) as the source — this is the ticket that finally DRAINS that buffer for critical events) or `svc-skeleton` (#39; Windows SCM — different risk profile, starts the e-service epic).
-- [ ] `relay-push` (#36): unblocked but **human-gated** — needs APNs/FCM sandbox credentials.
-- [ ] Still open: `core-uniffi-scaffold` (#27; **awaiting human answer**), `hard-doh-feed-ops` (#76), #21 fuzzing follow-up.
+- [ ] Next ticket: `svc-skeleton` (#39) — the e-service epic opener (Windows service host: SCM install/start/stop, LocalSystem, ACLs per a design section that doesn't exist [state that on the issue], rotating logs). **Different risk profile**: real SCM interaction; CI's windows-latest can install/start/stop services (admin runner), but tests need care — read MEMO 2026-07-03 for the Smart App Control history and the harness's netsh experience first. Ubuntu CI must skip the SCM tests (cfg(windows)).
+- [ ] `relay-deploy` (#38): now the last relay ticket besides push; owns durability (sqlite decision), real SMTP exercise, data minimization audit, backups. Mostly ops + the persistence refactor behind the existing seams.
+- [ ] `relay-push` (#36): **human-gated** — needs APNs/FCM sandbox credentials. Note from KNOWLEDGE: push-token registration must get the same partner-key authorization scrutiny as contact email (alert redirection).
+- [ ] Still open: `core-uniffi-scaffold` (#27; **awaiting human answer** on Swift/Kotlin CI), `hard-doh-feed-ops` (#76), #21 fuzzing follow-up.
 
 ## Current Blockers
 
-- #16 offline key ceremony — **human**; #17 THREAT_MODEL sign-off — **human**; #19 blocked on #16; #20 design doc doesn't exist; #27 paused on human CI call; #36 needs APNs/FCM creds — **human**
-- Standing: local `cargo test` broken (Smart App Control) — CI-only verification
+- #16 offline key ceremony — **human**; #17 THREAT_MODEL sign-off — **human**; #19 blocked on #16; #20 design doc doesn't exist; #27 paused; #36 needs credentials — **human**
+- Standing: local `cargo test` broken (Smart App Control). NEW: local `cargo build -p cf-relay` now needs `--no-default-features` (lettre's icu build scripts are SAC-blocked; default features remain correct for CI/releases — see KNOWLEDGE.md).
 
 ## Session Handoff
 
-**What was done (2026-07-06, per MEMO.md):** SEVEN tickets closed: #29, #30, #33, #32, #34, #31, #35 — the e-relay epic's entire protocol surface. Two real CI-caught bugs today (Backoff checked_shl earlier in #26's arc; sign path-and-query in #35).
+**What was done (2026-07-06, per MEMO.md):** EIGHT tickets closed: #29, #30, #33, #32, #34, #31, #35, #37. The relay epic is functionally complete except push (#36, credential-gated) and deploy (#38).
 
-**Where things stand:**
-- e-relay remaining: push (#36, human-gated), email-fallback (#37), deploy (#38). Everything else done.
-- The relay is now a functionally complete accountability hub: enrollment (anchor-authenticated create, pairing codes), signed+replay-guarded requests (path-and-query inside signatures), time attestation (seq=utc beacons), release-signed feed distribution (conditional GET), heartbeat→silence detection, per-device hash-chained event log (fork/gap/prune-keeps-head), and sealed/signed message routing (mailboxes, rate-limited by salted request hash).
-- In-memory seams throughout; durability lands at #38. Config: bind_addr, tls_cert_path, tls_key_path, beacon_key_path, feeds_dir.
-- The pending_events buffer (silence events) still has no consumer — #37 drains it for critical events; #36 would too.
+**The relay now:** enrolls households/devices (anchor-authenticated create, member-issued single-use pairing codes) · authenticates + replay-guards signed requests (path-AND-query inside signatures) · attests time (seq=utc beacons, online beacon key) · serves release-signed feeds (conditional GET) · tracks heartbeats → DeviceSilent/DeviceResumed · stores per-device hash chains (fork/gap detection, prune-keeps-head) · routes sealed requests + signed verdicts (mailboxes, rate-limited by salted request hash) · emails critical alerts over the independent channel (partner-key-authorized address, retries, default-on smtp feature).
+
+**Config surface (relay.toml)**: bind_addr, tls_cert_path, tls_key_path, beacon_key_path, feeds_dir, [smtp]{host, port, username, password_path, from} — all required, each with a rejection landmine.
 
 **Next steps / resume point:**
-- Read #37's issue first if picking it (DoD: tamper/silence/log-gap events email out even with push disabled; path independent of relay push; delivery retried). The mailer must be a seam (no real SMTP in CI — tests assert against a recording mock; a real lettre-backed impl compiles but is exercised only in deploy).
-- Alternative: #39 svc-skeleton (Windows SCM; CI has windows-latest, service install/start/stop tests need care — read MEMO 2026-07-03 for the Smart App Control history first).
+- `svc-skeleton` (#39): read the issue; debate the service-host crate choice (`windows-service` crate is the de-facto standard — read its actual API from the registry source per CLAUDE.md), how CI proves install/start/stop (windows-latest runners are admin; guard everything cfg(windows) + a Linux no-op), log rotation approach, and ACLs (no design section 8.5 exists — define in-repo, flag on the issue, pattern of #25/#30).
 
 **Open questions for the human:**
-- #36: provide APNs/FCM sandbox credentials when ready.
+- #36 APNs/FCM sandbox credentials, when ready.
 - #27 UniFFI CI surface — yes/no?
 - THREAT_MODEL sign-off (#17); key ceremony (#16)?
 - Locked = ApprovalOnly for every weakening (#25) — still comfortable?

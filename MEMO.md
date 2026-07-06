@@ -408,9 +408,17 @@ truth.
   is NOT the record — the chain is (drop test); rate-limit by salted
   request hash. CI-caught bug: sign path-AND-query, not path (query
   params now ride inside signatures).
+- ~~`relay-email-fallback`~~ — done (#37 closed, `5601688` + `cfe80bd` +
+  `9861b1c`). Partner-key-authorized contact email (role labels don't
+  authorize alert redirection); dispatcher at point of detection
+  (silence / log anomalies / critical chained event_types, all three
+  tested incl. no-re-alert-on-duplicate); EmailOutbox pure retry state,
+  sends outside the lock, loud give-up at 8 attempts; lettre behind a
+  DEFAULT-ON `smtp` feature (SAC blocks icu build scripts locally —
+  local dev uses --no-default-features; a no-feature binary refuses to
+  start). RelayConfig gains required [smtp] table.
 - `relay-push` (#36) — unblocked by #35, but needs APNs/FCM sandbox
   credentials — **human-gated external dependency**.
-- `relay-email-fallback` (#37) — unblocked by #31 (SMTP thinking).
 - `hard-doh-feed-ops` (#76) — unblocked by #32 (ops/tooling).
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface
