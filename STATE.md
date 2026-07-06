@@ -9,37 +9,33 @@
 
 ## Active Todo List
 
-- [ ] Pick next ticket — newly unblocked by #30: `relay-log` (#31), `relay-feeds` (#32), `relay-timeanchor` (#33), `relay-heartbeat-silence` (#34). All four have their cf-core halves already built (hashchain, FeedEnvelope + sign_feed, TimeBeacon). #32/#33 are small (serve signed feeds with conditional GET; emit signed beacons); #31 is the meaty one (append-only log with gap/fork detection + household isolation + prune-keeps-head).
-- [ ] Also open: `core-uniffi-scaffold` (#27; **awaiting human answer** on Swift/Kotlin CI jobs), `svc-skeleton` (#39; Windows SCM risk profile)
+- [ ] Pick next ticket — unblocked: `relay-feeds` (#32; serve release-signed FeedEnvelopes + conditional GET; cf-core sign/verify half exists — decide how signed feed files reach the relay, likely a config-dir of envelope JSONs), `relay-heartbeat-silence` (#34; heartbeat tracking + DeviceSilent emission — needs an events/notification story, may want to precede or fold into #31 thinking), `relay-log` (#31; the substantial one — append-only chained log, gap/fork detection, household isolation, prune-keeps-head; will force the durability debate)
+- [ ] Also open: `core-uniffi-scaffold` (#27; **awaiting human answer** on Swift/Kotlin CI jobs), `svc-skeleton` (#39; Windows SCM)
 - [ ] #21 follow-up: real coverage-guided fuzzing of the canonical encoder
 
 ## Current Blockers
 
-- #16 (f-secrets-keymgmt): offline key ceremony — **human action**
-- #17 (f-threat-model-doc): human sign-off; two residuals added in `2a2c633`
-- #19 (f-repro-builds): signing blocked on #16
-- #20 (core-models): design doc referenced by DoD does not exist
-- #27: paused on the human's CI-surface call
+- #16 offline key ceremony — **human**; #17 THREAT_MODEL sign-off — **human** (incl. `2a2c633` residuals); #19 blocked on #16; #20 design doc doesn't exist; #27 paused on human CI call
 - Standing: local `cargo test` broken (Smart App Control) — CI-only verification
 
 ## Session Handoff
 
 **What was done (2026-07-06, per MEMO.md):**
 - `relay-auth` (#29) closed — `8e4b978` + `6179400`
-- `relay-registry-pairing` (#30) closed — `22515f7` + `52bc1b6`, green run 28771055852. Anchor canonical encoding + self-attestation now exist in cf-core; registry + HTTP endpoints live; relay-auth wire format = four `x-cf-*` headers with method/path/body taken from the received request.
-- Both low-effort review passes: no findings.
+- `relay-registry-pairing` (#30) closed — `22515f7` + `52bc1b6`
+- `relay-timeanchor` (#33) closed — `a9e8e59`, first-round-trip green. Beacons: seq=utc (restart-safe, storage-free), online beacon key via `RelayConfig::beacon_key_path` (NOT the release key; pinning at install is the trust root), `GET /v1/time/beacon` + `/v1/time/key`.
+- Config surface changed: `RelayConfig` now REQUIRES `beacon_key_path` (64-hex Ed25519 seed file). Any existing relay.toml needs the new field.
 
 **Where things stand:**
-- e-relay: bootstrap, auth, registry/pairing done — the relay can now enroll households and devices end to end. Remaining: log, feeds, timeanchor beacons, heartbeat/silence, then approvals-transport → push → email-fallback → deploy.
-- e-core: only #27 remains (paused).
-- The registry is in-memory behind a seam; durability decision deferred to relay-deploy, but relay-log (#31) may force it sooner — debate there.
+- e-relay: bootstrap, auth, registry/pairing, timeanchor done. Remaining: feeds (#32), log (#31), heartbeat-silence (#34), then approvals-transport (#35) → push (#36) / email (#37) → deploy (#38).
+- e-core: only #27 (paused). Registry still in-memory behind its seam.
 
 **Next steps / resume point:**
-- Default next: `relay-feeds` (#32) or `relay-timeanchor` (#33) as quick wins (cf-core primitives exist; endpoints follow the #30 patterns), then `relay-log` (#31) as the substantial one. Read each issue's DoD first.
-- For #31: reuse `cf_core::hashchain::verify_chain`/`find_gaps` server-side; fork detection is THIS ticket's DoD row (deliberately not implemented in core-hashchain — see MEMO 2026-07-05).
+- Default next: `relay-feeds` (#32). Open design question to settle first: how do release-signed FeedEnvelopes get INTO the relay (config dir of signed envelope files loaded at startup + reloaded on change? an authenticated admin upload endpoint is more machinery + new authz class). Leaning config-dir: feeds are produced offline (release key), ops copies them in; hard-doh-feed-ops (#76) later automates.
+- Then #34 or #31; #31 forces the storage decision (human question pending below).
 
 **Open questions for the human:**
-- #27 CI surface (UniFFI + Swift/Kotlin jobs) — yes/no?
-- THREAT_MODEL sign-off (#17) incl. `2a2c633` residuals; key ceremony (#16)?
+- #27 UniFFI CI surface — yes/no?
+- THREAT_MODEL sign-off (#17); key ceremony (#16)?
 - Locked = ApprovalOnly for every weakening (#25) — still comfortable?
-- Relay storage: in-memory registry is fine until relay-log; OK to pick sqlite (or similar) when #31 needs durability, or prefer a different store?
+- Relay durability for #31: OK with sqlite (or preferred alternative) when the log needs it?

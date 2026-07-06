@@ -317,6 +317,25 @@ truth.
   - Process lesson: verify multi-line KAT hex literals against the CI
     value programmatically before pushing — an eyeballed split was off
     by three chars (caught locally, no round-trip wasted).
+- `relay-timeanchor` (#33, closed): commit `a9e8e59`, green on the
+  **first** round-trip
+  (https://github.com/mhamlaoui/ContentFilter/actions/runs/28781741584).
+  - `GET /v1/time/beacon`: freshly signed beacon with **seq = utc** —
+    restart-safe monotonicity with zero storage; relay clock rollback
+    stalls floors instead of corrupting them; never signing future time
+    preserves `floor ≤ real-now` (core-weakening leans on it). Rejected:
+    persisted counter (needs durability #31 hasn't forced; a reset
+    counter would brick every client floor).
+  - Beacon key = online operational key via
+    `RelayConfig::beacon_key_path` (64-hex seed file, required — no
+    beacon-less mode). NOT the release key (air-gapped keys can't attest
+    time continuously; bounded blast radius). `GET /v1/time/key` is
+    provisioning convenience; the trust root is install-time pinning.
+  - End-to-end test ingests the served beacon through a real
+    TimeAnchor/FloorStore; tampered beacon rejected without floor
+    movement. `ed25519-dalek` promoted to a full cf-relay dependency;
+    `AppState::Default` removed (an implicit beacon key in prod would be
+    a key nobody pinned).
 
 ---
 
@@ -336,9 +355,10 @@ truth.
 - ~~`core-relay-client`~~ — done (#26 closed, `a6d3a8e`..`7eb0d5a`, hardened `7a5a497`)
 - ~~`relay-auth`~~ — done (#29 closed, `8e4b978` + `6179400`)
 - ~~`relay-registry-pairing`~~ — done (#30 closed, `22515f7` + `52bc1b6`)
-- `relay-log` (#31), `relay-feeds` (#32), `relay-timeanchor` (#33),
-  `relay-heartbeat-silence` (#34) — all newly unblocked by #30; their
-  cf-core halves (hashchain, feed envelope, beacons) already exist.
+- ~~`relay-timeanchor`~~ — done (#33 closed, `a9e8e59`)
+- `relay-log` (#31), `relay-feeds` (#32), `relay-heartbeat-silence` (#34) —
+  unblocked by #30; their cf-core halves (hashchain, feed envelope)
+  already exist.
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface
   (UniFFI codegen + Swift/Kotlin build jobs) — human input requested.
