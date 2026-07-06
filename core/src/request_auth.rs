@@ -355,11 +355,17 @@ mod tests {
             [0x55; REQUEST_NONCE_LEN],
         )
         .unwrap();
-        // PENDING_CI_RUN: pinned from an actual CI run (local cargo test is
-        // blocked by Smart App Control on this dev machine). Tuple assert
-        // so one failure prints every actual value at once.
-        let expected_canonical_hex = "PENDING_CI_RUN";
-        let expected_signature_hex = "PENDING_CI_RUN";
+        // Pinned from an actual CI run (local cargo test is blocked by
+        // Smart App Control on this dev machine); identical on both OSes.
+        // https://github.com/mhamlaoui/ContentFilter/actions/runs/28769056538
+        let expected_canonical_hex =
+            "436f6e74656e7446696c7465722d52656c6179417574682d7631004444444444\
+            44444444444444444444440004504f5354000a2f76312f6576656e747358ff94\
+            828c746287cafa54c71b2b6eac24edc6d01e6481d9f2ea7aa6d06e0b9c000000\
+            006553f100555555555555555555555555555555555555555555555555";
+        let expected_signature_hex =
+            "8cacaec58cfe384fc8da75c46dbbc9a98609333aed3506409018f18d07d31458\
+            7f54f0272f01e26de053814250a32fdd4cd5d6b9c38b6237f69fe137c4c8900f";
         let canonical = statement.canonical_encode().unwrap();
         let sig = sign(&statement, &sk).unwrap();
         assert_eq!(
