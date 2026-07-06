@@ -41,6 +41,7 @@ use crate::auth::{
 };
 use crate::feeds::FeedStore;
 use crate::registry::{DeviceSubmission, PairingCode, Registry, RegistryError, PAIRING_CODE_LEN};
+use crate::silence::{SilenceTracker, DEFAULT_SILENCE_THRESHOLD_SECONDS};
 use axum::body::to_bytes;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -50,8 +51,8 @@ use axum::{Json, Router};
 use cf_core::request_auth::{body_sha256, AuthStatement, REQUEST_NONCE_LEN};
 use cf_core::timeanchor::{sign_beacon, TimeBeacon};
 use cf_core::{
-    Device, DeviceId, DeviceRole, Ed25519PublicKey, FeedKind, HouseholdId, Platform,
-    RegisterRequest, RegisterResponse, SchemaVersion, Signature, TrustAnchor,
+    Device, DeviceId, DeviceRole, Ed25519PublicKey, FeedKind, HouseholdId, NotificationEvent,
+    Platform, RegisterRequest, RegisterResponse, SchemaVersion, Signature, TrustAnchor,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -72,9 +73,35 @@ pub struct AppState {
     feed_store: Arc<FeedStore>,
 }
 
+/// Pending-notification cap. This buffer is a loudly-documented stand-in
+/// until relay-log (#31) persists events and #35/#37 deliver them; a cap
+/// keeps a stalled pipeline from becoming unbounded memory, and dropping
+/// the *oldest* (with a warning) loses the least — silence alerts repeat
+/// their meaning as long as the outage lasts.
+const MAX_PENDING_EVENTS: usize = 4096;
+
 struct Shared {
     registry: Registry,
     guard: ReplayGuard,
+    silence: SilenceTracker,
+    pending_events: std::collections::VecDeque<NotificationEvent>,
+}
+
+impl Shared {
+    fn push_event(&mut self, event: NotificationEvent) {
+        if self.pending_events.len() == MAX_PENDING_EVENTS {
+            tracing::warn!("pending-event buffer full; dropping the oldest event");
+            self.pending_events.pop_front();
+        }
+        tracing::info!(kind = ?event.kind, device = ?event.device_id, "notification event");
+        self.pending_events.push_back(event);
+    }
+
+    fn record_liveness(&mut self, household_id: HouseholdId, device_id: DeviceId, now: u64) {
+        if let Some(resumed) = self.silence.record_heartbeat(household_id, device_id, now) {
+            self.push_event(resumed);
+        }
+    }
 }
 
 impl AppState {
@@ -83,11 +110,32 @@ impl AppState {
             inner: Arc::new(Mutex::new(Shared {
                 registry: Registry::new(),
                 guard: ReplayGuard::new(DEFAULT_MAX_SKEW_SECONDS),
+                silence: SilenceTracker::new(DEFAULT_SILENCE_THRESHOLD_SECONDS),
+                pending_events: std::collections::VecDeque::new(),
             })),
             rng: SystemRandom::new(),
             beacon_key: Arc::new(services.beacon_key),
             feed_store: Arc::new(services.feed_store),
         }
+    }
+
+    /// Spawns the periodic silence sweep. Called from `app()` (under the
+    /// server runtime), deliberately not from `router()` — endpoint tests
+    /// drive `SilenceTracker` directly with a controlled clock instead.
+    pub(crate) fn spawn_silence_sweeper(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let now = unix_now();
+                let mut shared = state.inner.lock().expect("registry lock poisoned");
+                let events = shared.silence.sweep(now);
+                for event in events {
+                    shared.push_event(event);
+                }
+            }
+        });
     }
 
     fn random_bytes<const N: usize>(&self) -> [u8; N] {
@@ -115,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/time/beacon", get(get_beacon))
         .route("/v1/time/key", get(get_beacon_key))
         .route("/v1/feeds/:kind", get(get_feed))
+        .route("/v1/heartbeat", post(heartbeat))
         .with_state(state)
 }
 
@@ -331,6 +380,37 @@ async fn get_beacon_key(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Signed liveness ping (relay-heartbeat-silence). Empty body — its
+/// sha256 is still inside the signed statement, and the nonce/timestamp
+/// replay guard applies like any mutating request. 204 on success; the
+/// subject is the authenticated device itself.
+async fn heartbeat(State(state): State<AppState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let Ok(body_bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    let device_id = match authenticate(
+        &mut shared,
+        &parts.headers,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &body_bytes,
+        now,
+    ) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    // Auth guarantees the device is registered, so a missing household is
+    // a registry invariant violation, not a client error.
+    let Some(household_id) = shared.registry.household_of(&device_id) else {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "device has no household");
+    };
+    shared.record_liveness(household_id, device_id, now);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[derive(Debug, Deserialize)]
 struct FeedQuery {
     /// The client's last accepted feed_seq (cf-core `pull_feed` sends
@@ -376,15 +456,20 @@ async fn create_household(
         device_id,
         now,
     ) {
-        Ok(device) => (
-            StatusCode::CREATED,
-            Json(CreateHouseholdResponse {
-                version: SchemaVersion::CURRENT,
-                device,
-                anchor: request.anchor,
-            }),
-        )
-            .into_response(),
+        Ok(device) => {
+            // Enrollment is a liveness signal: the silence clock starts
+            // here, so a device killed right after install still alerts.
+            shared.record_liveness(device.household_id, device.id, now);
+            (
+                StatusCode::CREATED,
+                Json(CreateHouseholdResponse {
+                    version: SchemaVersion::CURRENT,
+                    device,
+                    anchor: request.anchor,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => registry_error_response(e),
     }
 }
@@ -465,12 +550,16 @@ async fn pair(State(state): State<AppState>, Json(request): Json<RegisterRequest
         .registry
         .redeem_pairing_code(&code, submission, device_id, now)
     {
-        Ok((device, anchor)) => Json(RegisterResponse {
-            version: SchemaVersion::CURRENT,
-            device,
-            anchor,
-        })
-        .into_response(),
+        Ok((device, anchor)) => {
+            // Same liveness seeding as household creation.
+            shared.record_liveness(device.household_id, device.id, now);
+            Json(RegisterResponse {
+                version: SchemaVersion::CURRENT,
+                device,
+                anchor,
+            })
+            .into_response()
+        }
         Err(e) => registry_error_response(e),
     }
 }
@@ -748,6 +837,39 @@ mod tests {
         let (status, body) =
             send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 7).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay accepted: {body}");
+    }
+
+    // --- heartbeats (relay-heartbeat-silence) -----------------------------
+
+    #[tokio::test]
+    async fn a_signed_heartbeat_is_accepted_and_an_unsigned_one_is_not() {
+        // The heartbeat endpoint's HTTP half: authenticated ingest. The
+        // silence lifecycle itself (threshold, DeviceSilent, resume) is
+        // SilenceTracker's own test suite — time can't be advanced through
+        // a real router.
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, _) = founder_keys();
+        let _ = household_hex;
+
+        let (status, _) =
+            send_signed_empty_post(&router, "/v1/heartbeat", &founder_id_hex, &founder_sk, 11)
+                .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Unsigned: rejected, like every mutating request.
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/v1/heartbeat")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // A replayed signed heartbeat: rejected by the nonce guard.
+        let (status, _) =
+            send_signed_empty_post(&router, "/v1/heartbeat", &founder_id_hex, &founder_sk, 11)
+                .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     // --- feeds (relay-feeds) ---------------------------------------------

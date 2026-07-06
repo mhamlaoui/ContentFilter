@@ -23,6 +23,7 @@ pub mod auth;
 pub mod feeds;
 pub mod http;
 pub mod registry;
+pub mod silence;
 
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -102,8 +103,13 @@ async fn health() -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse { status: "ok" })
 }
 
+/// Builds the full application router and starts the background silence
+/// sweeper — call under a tokio runtime. Endpoint tests use
+/// `http::router` directly (no sweeper; they drive the tracker's clock).
 pub fn app(services: AppServices) -> Router {
-    http::router(http::AppState::new(services)).route("/healthz", axum::routing::get(health))
+    let state = http::AppState::new(services);
+    state.spawn_silence_sweeper();
+    http::router(state).route("/healthz", axum::routing::get(health))
 }
 
 /// Loads the beacon signing key: a file holding exactly 64 hex chars

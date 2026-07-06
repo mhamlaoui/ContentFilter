@@ -292,6 +292,14 @@ impl Registry {
             .get(household_id)
             .is_some_and(|r| r.devices.contains_key(device_id))
     }
+
+    /// The household a registered device belongs to — the subject lookup
+    /// for endpoints where the device itself is the topic (heartbeats).
+    pub fn household_of(&self, device_id: &DeviceId) -> Option<HouseholdId> {
+        self.households
+            .iter()
+            .find_map(|(id, r)| r.devices.contains_key(device_id).then_some(*id))
+    }
 }
 
 /// The registry doubles as relay-auth's key resolver: a device's identity
