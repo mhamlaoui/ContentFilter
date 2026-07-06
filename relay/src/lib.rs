@@ -22,6 +22,7 @@
 pub mod auth;
 pub mod feeds;
 pub mod http;
+pub mod log;
 pub mod registry;
 pub mod silence;
 

@@ -40,6 +40,7 @@ use crate::auth::{
     verify_mutating_request, AuthError, IncomingRequest, ReplayGuard, DEFAULT_MAX_SKEW_SECONDS,
 };
 use crate::feeds::FeedStore;
+use crate::log::{AppendOutcome, EventLog, LogError};
 use crate::registry::{DeviceSubmission, PairingCode, Registry, RegistryError, PAIRING_CODE_LEN};
 use crate::silence::{SilenceTracker, DEFAULT_SILENCE_THRESHOLD_SECONDS};
 use axum::body::to_bytes;
@@ -84,6 +85,7 @@ struct Shared {
     registry: Registry,
     guard: ReplayGuard,
     silence: SilenceTracker,
+    log: EventLog,
     pending_events: std::collections::VecDeque<NotificationEvent>,
 }
 
@@ -111,6 +113,7 @@ impl AppState {
                 registry: Registry::new(),
                 guard: ReplayGuard::new(DEFAULT_MAX_SKEW_SECONDS),
                 silence: SilenceTracker::new(DEFAULT_SILENCE_THRESHOLD_SECONDS),
+                log: EventLog::new(),
                 pending_events: std::collections::VecDeque::new(),
             })),
             rng: SystemRandom::new(),
@@ -164,6 +167,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/time/key", get(get_beacon_key))
         .route("/v1/feeds/:kind", get(get_feed))
         .route("/v1/heartbeat", post(heartbeat))
+        .route("/v1/households/:household/events", post(push_event))
+        .route("/v1/households/:household/log/:device", get(get_device_log))
         .with_state(state)
 }
 
@@ -409,6 +414,131 @@ async fn heartbeat(State(state): State<AppState>, request: Request) -> Response 
     };
     shared.record_liveness(household_id, device_id, now);
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// A device chain's readable state (relay-log). Events ride exactly as
+/// accepted — signatures intact — so the fetching side can run cf-core's
+/// `verify_chain` over them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceLogResponse {
+    pub version: SchemaVersion,
+    pub pruned_before: u64,
+    pub next_seq: u64,
+    pub events: Vec<cf_core::ChainedEvent>,
+}
+
+fn log_error_response(e: LogError) -> Response {
+    // Every rejection here is a flag worth keeping (THREAT_MODEL row 3):
+    // gaps and forks are the censorship/rewrite signals.
+    tracing::warn!(error = %e, "event append rejected");
+    let status = match &e {
+        LogError::UnknownDevice | LogError::InvalidSignature => StatusCode::UNAUTHORIZED,
+        LogError::SeqGap { .. }
+        | LogError::Fork { .. }
+        | LogError::BrokenLink { .. }
+        | LogError::SeqPruned { .. } => StatusCode::CONFLICT,
+    };
+    error_response(status, e.to_string())
+}
+
+/// Signed event push (relay-log): the wire behind
+/// `RelayTransport::push_event`. Body is one `ChainedEvent`; the
+/// authenticated device must be a member of the household in the path AND
+/// the event's author — devices push their own history.
+async fn push_event(
+    State(state): State<AppState>,
+    Path(household_hex): Path<String>,
+    request: Request,
+) -> Response {
+    let Ok(household_id) = HouseholdId::from_hex(&household_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "household not found");
+    };
+    let (parts, body) = request.into_parts();
+    let Ok(body_bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    let device_id = match authenticate(
+        &mut shared,
+        &parts.headers,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &body_bytes,
+        now,
+    ) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    if !shared.registry.is_member(&household_id, &device_id) {
+        return error_response(StatusCode::FORBIDDEN, "not a member of this household");
+    }
+    let Ok(event) = serde_json::from_slice::<cf_core::ChainedEvent>(&body_bytes) else {
+        return error_response(StatusCode::BAD_REQUEST, "body is not a chained event");
+    };
+    if event.device_id != device_id {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "events must be pushed by their author",
+        );
+    }
+    // Pushing events is also a liveness signal — a device whose outbox is
+    // draining is not silent.
+    shared.record_liveness(household_id, device_id, now);
+    // append needs &Registry (the key resolver) and &mut EventLog out of
+    // the same &mut Shared — a destructuring split borrow provides both.
+    let Shared { registry, log, .. } = &mut *shared;
+    match log.append(household_id, event, &*registry) {
+        Ok(AppendOutcome::Appended) => StatusCode::CREATED.into_response(),
+        Ok(AppendOutcome::Duplicate) => StatusCode::OK.into_response(),
+        Err(e) => log_error_response(e),
+    }
+}
+
+/// Signed log fetch (relay-log): a member device (typically the partner's)
+/// reads a device chain to audit it with cf-core's `verify_chain`.
+async fn get_device_log(
+    State(state): State<AppState>,
+    Path((household_hex, device_hex)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    let Ok(household_id) = HouseholdId::from_hex(&household_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "household not found");
+    };
+    let Ok(subject_device) = DeviceId::from_hex(&device_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "device not found");
+    };
+    let (parts, body) = request.into_parts();
+    let Ok(body_bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    let reader = match authenticate(
+        &mut shared,
+        &parts.headers,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &body_bytes,
+        now,
+    ) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    if !shared.registry.is_member(&household_id, &reader) {
+        return error_response(StatusCode::FORBIDDEN, "not a member of this household");
+    }
+    match shared.log.device_log(&household_id, &subject_device) {
+        Some(view) => Json(DeviceLogResponse {
+            version: SchemaVersion::CURRENT,
+            pruned_before: view.pruned_before,
+            next_seq: view.next_seq,
+            events: view.events,
+        })
+        .into_response(),
+        None => error_response(StatusCode::NOT_FOUND, "no events for this device"),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -837,6 +967,215 @@ mod tests {
         let (status, body) =
             send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 7).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay accepted: {body}");
+    }
+
+    // --- the event log (relay-log) ----------------------------------------
+
+    /// Signs and sends a request whose body matters (event pushes): the
+    /// statement's hash covers the exact bytes sent.
+    async fn send_signed_request(
+        router: &Router,
+        method: &str,
+        path: &str,
+        device_id_hex: &str,
+        signing_key: &SigningKey,
+        nonce_byte: u8,
+        body_bytes: Vec<u8>,
+    ) -> (StatusCode, serde_json::Value) {
+        let device_id = DeviceId::from_hex(device_id_hex).unwrap();
+        let ts = unix_now();
+        let nonce = [nonce_byte; REQUEST_NONCE_LEN];
+        let statement =
+            AuthStatement::new(device_id, method, path, body_sha256(&body_bytes), ts, nonce)
+                .unwrap();
+        let signature = request_auth::sign(&statement, signing_key).unwrap();
+        let request = HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .header("x-cf-device-id", device_id_hex)
+            .header("x-cf-timestamp", ts.to_string())
+            .header("x-cf-nonce", hex_encode(&nonce))
+            .header("x-cf-signature", signature.to_hex())
+            .body(Body::from(body_bytes))
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, value)
+    }
+
+    fn signed_chain_event(
+        device_id: DeviceId,
+        signing_key: &SigningKey,
+        seq: u64,
+        prev_hash: [u8; 32],
+        payload: &str,
+    ) -> cf_core::ChainedEvent {
+        let mut event = cf_core::ChainedEvent {
+            seq,
+            prev_hash,
+            device_id,
+            event_type: "test.event".into(),
+            ts: 1_700_000_000 + seq,
+            payload: payload.as_bytes().to_vec(),
+            sig: Signature([0u8; 64]),
+        };
+        event.sig = cf_core::hashchain::sign_event(&event, signing_key);
+        event
+    }
+
+    #[tokio::test]
+    async fn the_event_log_flow_works_end_to_end_over_http() {
+        use cf_core::hashchain::{event_hash, verify_chain, GENESIS_HASH};
+
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, founder_vk) = founder_keys();
+        let founder_id = DeviceId::from_hex(&founder_id_hex).unwrap();
+        let events_path = format!("/v1/households/{household_hex}/events");
+
+        // Two chained appends.
+        let e1 = signed_chain_event(founder_id, &founder_sk, 1, GENESIS_HASH, "p1");
+        let (status, body) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            21,
+            serde_json::to_vec(&e1).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "push failed: {body}");
+
+        let e2 = signed_chain_event(founder_id, &founder_sk, 2, event_hash(&e1), "p2");
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            22,
+            serde_json::to_vec(&e2).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Idempotent duplicate (outbox retry after a lost ack): 200.
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            23,
+            serde_json::to_vec(&e2).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A gap is flagged and rejected: 409.
+        let e9 = signed_chain_event(founder_id, &founder_sk, 9, event_hash(&e2), "p9");
+        let (status, body) = send_signed_request(
+            &router,
+            "POST",
+            &events_path,
+            &founder_id_hex,
+            &founder_sk,
+            24,
+            serde_json::to_vec(&e9).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "gap accepted: {body}");
+
+        // A signed member fetch returns the chain, which verifies under
+        // cf-core against the device's registered key.
+        let log_path = format!("/v1/households/{household_hex}/log/{founder_id_hex}");
+        let (status, body) = send_signed_request(
+            &router,
+            "GET",
+            &log_path,
+            &founder_id_hex,
+            &founder_sk,
+            25,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "log fetch failed: {body}");
+        let view: DeviceLogResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(view.next_seq, 3);
+        assert_eq!(view.pruned_before, 1);
+        assert_eq!(view.events.len(), 2);
+
+        struct OneKey(DeviceId, Ed25519PublicKey);
+        impl cf_core::DeviceKeyResolver for OneKey {
+            fn resolve(&self, device_id: &DeviceId) -> Option<Ed25519PublicKey> {
+                (*device_id == self.0).then_some(self.1)
+            }
+        }
+        assert!(verify_chain(&view.events, &OneKey(founder_id, founder_vk)).is_ok());
+
+        // Unsigned fetch: rejected.
+        let request = HttpRequest::builder()
+            .method("GET")
+            .uri(&log_path)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn events_must_be_pushed_by_their_author() {
+        use cf_core::hashchain::GENESIS_HASH;
+
+        // Register a second device via pairing, then have it push an
+        // event CLAIMING the founder authored it. The event's signature is
+        // genuine (signed with the founder key it claims), so only the
+        // author check stands between this and acceptance.
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, _) = founder_keys();
+        let path = format!("/v1/households/{household_hex}/pairing-codes");
+        let (_, body) =
+            send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 31).await;
+        let code = body["code"].as_str().unwrap().to_string();
+
+        let joiner_sk = SigningKey::from_bytes(&[0x71; 32]);
+        let joiner_vk = Ed25519PublicKey(joiner_sk.verifying_key().to_bytes());
+        let (_, body) = send_json(
+            &router,
+            "POST",
+            "/v1/pair",
+            serde_json::json!({
+                "version": 1,
+                "pairing_code": code,
+                "platform": "android",
+                "role": { "role": "monitored" },
+                "identity_key": joiner_vk.to_hex(),
+            }),
+        )
+        .await;
+        let joiner_id_hex = body["device"]["id"].as_str().unwrap().to_string();
+
+        let founder_id = DeviceId::from_hex(&founder_id_hex).unwrap();
+        let forged = signed_chain_event(founder_id, &founder_sk, 1, GENESIS_HASH, "not mine");
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &format!("/v1/households/{household_hex}/events"),
+            &joiner_id_hex,
+            &joiner_sk,
+            32,
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     // --- heartbeats (relay-heartbeat-silence) -----------------------------

@@ -147,7 +147,12 @@ pub fn sign_event(event: &ChainedEvent, signing_key: &SigningKey) -> CfSignature
     CfSignature(sig.to_bytes())
 }
 
-fn verify_event_signature(event: &ChainedEvent, verify_key: &Ed25519PublicKey) -> bool {
+/// Verifies one event's signature against a device key. Public since
+/// relay-log: server-side append verification checks each arriving event
+/// individually (the server maintains its own head/seq state, so
+/// [`verify_chain`]'s whole-slice walk is the read-side tool, not the
+/// append-side one).
+pub fn verify_event_signature(event: &ChainedEvent, verify_key: &Ed25519PublicKey) -> bool {
     let Ok(vk) = VerifyingKey::from_bytes(&verify_key.0) else {
         return false;
     };
