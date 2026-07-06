@@ -286,6 +286,37 @@ truth.
     traffic can't poison or grow the replay cache.
   - Axum middleware deliberately deferred to relay-registry-pairing
     (#30), which owns the wire framing and the first mutating endpoints.
+- `relay-registry-pairing` (#30, closed): commits `22515f7`, `52bc1b6`
+  (KAT pin); green run
+  https://github.com/mhamlaoui/ContentFilter/actions/runs/28771055852 —
+  two round-trips, only the deliberate KAT failure.
+  - cf-core `household.rs` gained the anchor's canonical signable bytes +
+    self-attestation (signed by the partner key it names — proves
+    authorship of exactly these fields, nothing more; pinning stays with
+    svc-config-anchor). `verify_signed_by()` for the rotation rule; tier
+    bytes pinned.
+  - `relay/src/registry.rs`: pure state machine (clock/RNG injected).
+    Creation authenticated by the anchor itself + founding device
+    registered atomically (resolves the relay-auth chicken-and-egg).
+    Server-authoritative rule: replacement must verify against the
+    *stored* anchor's key and strictly advance seq — a thief's fully
+    self-consistent anchor is refused (test). Lost-key recovery + any
+    rotation HTTP endpoint deliberately absent (sec-key-recovery's).
+    Pairing codes: member-issued, single-use, 15-min TTL, atomic
+    consume; failure reasons collapsed into one error. Registry
+    implements `DeviceKeyResolver` → relay-auth reads registration
+    directly.
+  - `relay/src/http.rs`: endpoints + relay-auth wire format (four
+    `x-cf-*` headers; method/path/body taken from the received request,
+    so endpoint/body binding is constructive, not checked).
+    `POST /v1/pair` speaks core-relay-client's
+    RegisterRequest/RegisterResponse. End-to-end test: create → signed
+    code issue → pair → joiner authenticates its own request → code
+    dead; HTTP-level replay rejected. Deps: ring (already rustls's
+    backend) for codes/ids; tower (dev) for Router::oneshot.
+  - Process lesson: verify multi-line KAT hex literals against the CI
+    value programmatically before pushing — an eyeballed split was off
+    by three chars (caught locally, no round-trip wasted).
 
 ---
 
@@ -304,11 +335,13 @@ truth.
 - ~~`core-weakening`~~ — done (#25 closed, `2a2c633`)
 - ~~`core-relay-client`~~ — done (#26 closed, `a6d3a8e`..`7eb0d5a`, hardened `7a5a497`)
 - ~~`relay-auth`~~ — done (#29 closed, `8e4b978` + `6179400`)
+- ~~`relay-registry-pairing`~~ — done (#30 closed, `22515f7` + `52bc1b6`)
+- `relay-log` (#31), `relay-feeds` (#32), `relay-timeanchor` (#33),
+  `relay-heartbeat-silence` (#34) — all newly unblocked by #30; their
+  cf-core halves (hashchain, feed envelope, beacons) already exist.
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
   both now done). Closes out the e-core epic; needs new CI surface
   (UniFFI codegen + Swift/Kotlin build jobs) — human input requested.
-- `relay-registry-pairing` (#30; blocked by relay-auth — now done). Continues
-  the accountability spine; first real mutating endpoints + auth wiring.
 - `svc-skeleton` (#39; e-service epic; blocked by core-models only — done). Different
   risk profile from everything above: involves actually installing/starting/
   stopping a Windows service via SCM, not just application-level Rust.

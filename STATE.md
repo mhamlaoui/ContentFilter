@@ -9,35 +9,37 @@
 
 ## Active Todo List
 
-- [ ] Pick next ticket — unblocked: `relay-registry-pairing` (#30; continues the accountability spine, first real mutating endpoints — wires #29's `verify_mutating_request` and owns the auth wire framing), `core-uniffi-scaffold` (#27; **awaiting human answer** on adding UniFFI + Swift/Kotlin CI jobs), `svc-skeleton` (#39; Windows SCM risk profile)
-- [ ] #21 follow-up: real coverage-guided fuzzing of the canonical encoder (property-test stand-in exists)
+- [ ] Pick next ticket — newly unblocked by #30: `relay-log` (#31), `relay-feeds` (#32), `relay-timeanchor` (#33), `relay-heartbeat-silence` (#34). All four have their cf-core halves already built (hashchain, FeedEnvelope + sign_feed, TimeBeacon). #32/#33 are small (serve signed feeds with conditional GET; emit signed beacons); #31 is the meaty one (append-only log with gap/fork detection + household isolation + prune-keeps-head).
+- [ ] Also open: `core-uniffi-scaffold` (#27; **awaiting human answer** on Swift/Kotlin CI jobs), `svc-skeleton` (#39; Windows SCM risk profile)
+- [ ] #21 follow-up: real coverage-guided fuzzing of the canonical encoder
 
 ## Current Blockers
 
-- #16 (f-secrets-keymgmt): needs actual offline key ceremony — **human action, air-gapped machine**
-- #17 (f-threat-model-doc): needs human review/sign-off — note: THREAT_MODEL.md gained two residual entries in `2a2c633`
-- #19 (f-repro-builds): signing blocked on #16's key
-- #20 (core-models): DoD box unclosable — referenced design doc does not exist
-- #27 (core-uniffi-scaffold): technically unblocked, but paused on the human's call re: new CI toolchain surface
-- Standing: local `cargo test` broken (Smart App Control) — all test verification via CI round-trips
+- #16 (f-secrets-keymgmt): offline key ceremony — **human action**
+- #17 (f-threat-model-doc): human sign-off; two residuals added in `2a2c633`
+- #19 (f-repro-builds): signing blocked on #16
+- #20 (core-models): design doc referenced by DoD does not exist
+- #27: paused on the human's CI-surface call
+- Standing: local `cargo test` broken (Smart App Control) — CI-only verification
 
 ## Session Handoff
 
-**What was done (2026-07-05 evening → 2026-07-06, per MEMO.md):**
-- `core-weakening` (#25) closed — `2a2c633`, first-round-trip green
-- `core-relay-client` (#26) closed — `a6d3a8e`..`7eb0d5a` + post-close redteam hardening `7a5a497` (release key out of persisted state; truncation guards on signed encodings; FeedKind tag bytes pinned)
-- `relay-auth` (#29) closed — `8e4b978` + `6179400`, green run 28769161796, all DoD boxes checked, no real bugs (2 round-trips, one being the KAT pin)
+**What was done (2026-07-06, per MEMO.md):**
+- `relay-auth` (#29) closed — `8e4b978` + `6179400`
+- `relay-registry-pairing` (#30) closed — `22515f7` + `52bc1b6`, green run 28771055852. Anchor canonical encoding + self-attestation now exist in cf-core; registry + HTTP endpoints live; relay-auth wire format = four `x-cf-*` headers with method/path/body taken from the received request.
+- Both low-effort review passes: no findings.
 
 **Where things stand:**
-- e-core: only `core-uniffi-scaffold` (#27) remains (paused on human input)
-- e-relay: bootstrap + auth done; registry/pairing (#30) is the next spine link
-- 5 long-running partial issues unchanged (see Blockers)
+- e-relay: bootstrap, auth, registry/pairing done — the relay can now enroll households and devices end to end. Remaining: log, feeds, timeanchor beacons, heartbeat/silence, then approvals-transport → push → email-fallback → deploy.
+- e-core: only #27 remains (paused).
+- The registry is in-memory behind a seam; durability decision deferred to relay-deploy, but relay-log (#31) may force it sooner — debate there.
 
 **Next steps / resume point:**
-- Default next: `relay-registry-pairing` (#30). Read its issue first. It owns: household registry storage, signed trust-anchor authority (needs a canonical anchor encoding — coordinate with the "anchor signature not verified in relay_client::register" boundary noted on #26), pairing codes with expiry, and mounting #29's `verify_mutating_request` on the first mutating endpoints (it also owns the statement's HTTP wire framing).
-- Storage decision will come up: relay currently has no database dependency. Debate in-memory-behind-a-trait vs sqlite now; check BACKLOG's relay-deploy ("data minimization") before adding anything heavy.
+- Default next: `relay-feeds` (#32) or `relay-timeanchor` (#33) as quick wins (cf-core primitives exist; endpoints follow the #30 patterns), then `relay-log` (#31) as the substantial one. Read each issue's DoD first.
+- For #31: reuse `cf_core::hashchain::verify_chain`/`find_gaps` server-side; fork detection is THIS ticket's DoD row (deliberately not implemented in core-hashchain — see MEMO 2026-07-05).
 
 **Open questions for the human:**
-- #27: OK to add UniFFI + Swift/Kotlin build jobs to CI, or keep riding the relay/service tracks first?
-- Sign off THREAT_MODEL.md (#17), incl. the two `2a2c633` residuals? Schedule key ceremony (#16)?
-- Locked = ApprovalOnly for every weakening (#25 comment) — still comfortable?
+- #27 CI surface (UniFFI + Swift/Kotlin jobs) — yes/no?
+- THREAT_MODEL sign-off (#17) incl. `2a2c633` residuals; key ceremony (#16)?
+- Locked = ApprovalOnly for every weakening (#25) — still comfortable?
+- Relay storage: in-memory registry is fine until relay-log; OK to pick sqlite (or similar) when #31 needs durability, or prefer a different store?
