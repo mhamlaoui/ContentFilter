@@ -29,6 +29,8 @@ hyper-util = { version = "0.1.20", features = ["server-auto", "server-graceful",
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+# Beacon signing (relay-timeanchor); same dalek cf-core already uses.
+ed25519-dalek = "2"
 # Pairing codes and relay-minted ids need a CSPRNG; ring is already the
 # rustls crypto backend in this graph, so this adds no new compiled code.
 ring = "0.17"
@@ -39,9 +41,6 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
-# Tests sign AuthStatements as devices would; same dalek version cf-core
-# already brings into the graph.
-ed25519-dalek = "2"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tempfile = "3"

@@ -45,6 +45,15 @@ pub struct RelayConfig {
     pub bind_addr: SocketAddr,
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
+    /// 64 hex chars (a 32-byte Ed25519 seed) signing time beacons
+    /// (relay-timeanchor). An **online, operational** key — deliberately
+    /// not the offline release key (docs/KEY_CEREMONY.md): beacons attest
+    /// time continuously, which an air-gapped key cannot do, and the blast
+    /// radius of its compromise is bounded (a lying relay clock is already
+    /// in the threat model; the floor mechanism only ever *advances*
+    /// client floors, and only signed feeds/approvals gate anything
+    /// stronger). Required, like the TLS paths — no beacon-less mode.
+    pub beacon_key_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -80,8 +89,19 @@ async fn health() -> axum::Json<HealthResponse> {
     axum::Json(HealthResponse { status: "ok" })
 }
 
-pub fn app() -> Router {
-    http::router(http::AppState::new()).route("/healthz", axum::routing::get(health))
+pub fn app(beacon_key: ed25519_dalek::SigningKey) -> Router {
+    http::router(http::AppState::new(beacon_key)).route("/healthz", axum::routing::get(health))
+}
+
+/// Loads the beacon signing key: a file holding exactly 64 hex chars
+/// (surrounding whitespace tolerated). Anything else is an error — a
+/// silently-truncated or zero-padded seed would still "work" while being
+/// a different key than the operator provisioned.
+pub fn load_beacon_key(path: &Path) -> std::io::Result<ed25519_dalek::SigningKey> {
+    let text = std::fs::read_to_string(path)?;
+    let seed: [u8; 32] = http::hex_decode(text.trim())
+        .ok_or_else(|| std::io::Error::other("beacon key file must hold exactly 64 hex chars"))?;
+    Ok(ed25519_dalek::SigningKey::from_bytes(&seed))
 }
 
 /// How long a graceful shutdown waits for in-flight connections to finish
@@ -128,10 +148,12 @@ pub async fn run(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(config.bind_addr).await?;
+    let beacon_key = load_beacon_key(&config.beacon_key_path)?;
     run_with_listener(
         listener,
         config.tls_cert_path,
         config.tls_key_path,
+        beacon_key,
         shutdown,
     )
     .await
@@ -152,13 +174,14 @@ pub async fn run_with_listener(
     listener: TcpListener,
     tls_cert_path: PathBuf,
     tls_key_path: PathBuf,
+    beacon_key: ed25519_dalek::SigningKey,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let tls_config = load_tls_config(&tls_cert_path, &tls_key_path)?;
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     tracing::info!(addr = %listener.local_addr()?, "relay starting");
 
-    let app = app();
+    let app = app(beacon_key);
     // A JoinSet of raw tasks isn't enough for graceful shutdown: an
     // HTTP/1.1 keep-alive connection's task doesn't finish just because we
     // stop accepting new connections — it stays open waiting for a
@@ -213,6 +236,7 @@ mod tests {
             bind_addr = "127.0.0.1:8443"
             tls_cert_path = "cert.pem"
             tls_key_path = "key.pem"
+            beacon_key_path = "beacon.key"
             "#,
         )
         .unwrap();
@@ -220,6 +244,47 @@ mod tests {
         let config = RelayConfig::load(&path).unwrap();
         assert_eq!(config.bind_addr.port(), 8443);
         assert_eq!(config.tls_cert_path, PathBuf::from("cert.pem"));
+        assert_eq!(config.beacon_key_path, PathBuf::from("beacon.key"));
+    }
+
+    #[test]
+    fn config_without_a_beacon_key_path_is_rejected_at_parse_time() {
+        // Same landmine shape as the TLS one below: no Option, no default,
+        // no beacon-less relay.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.toml");
+        std::fs::write(
+            &path,
+            r#"
+            bind_addr = "127.0.0.1:8443"
+            tls_cert_path = "cert.pem"
+            tls_key_path = "key.pem"
+            "#,
+        )
+        .unwrap();
+        assert!(RelayConfig::load(&path).is_err());
+    }
+
+    #[test]
+    fn beacon_key_loads_from_exactly_64_hex_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("beacon.key");
+        std::fs::write(&path, format!("{}\n", "ab".repeat(32))).unwrap();
+        let key = load_beacon_key(&path).unwrap();
+        assert_eq!(key.to_bytes(), [0xab; 32]);
+    }
+
+    #[test]
+    fn truncated_or_non_hex_beacon_keys_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["ab".repeat(31), "zz".repeat(32), String::new()] {
+            let path = dir.path().join("beacon.key");
+            std::fs::write(&path, bad).unwrap();
+            assert!(
+                load_beacon_key(&path).is_err(),
+                "a wrong-shape seed must never quietly become a key"
+            );
+        }
     }
 
     #[test]
