@@ -43,6 +43,9 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
+# Transport tests seal payloads as devices would; same crypto_box cf-core
+# already brings into the graph.
+crypto_box = { version = "0.9", features = ["seal"] }
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tempfile = "3"

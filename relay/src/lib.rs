@@ -23,6 +23,7 @@ pub mod auth;
 pub mod feeds;
 pub mod http;
 pub mod log;
+pub mod mailbox;
 pub mod registry;
 pub mod silence;
 

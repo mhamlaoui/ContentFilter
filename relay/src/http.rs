@@ -41,6 +41,7 @@ use crate::auth::{
 };
 use crate::feeds::FeedStore;
 use crate::log::{AppendOutcome, EventLog, LogError};
+use crate::mailbox::{MailboxError, MailboxStore};
 use crate::registry::{DeviceSubmission, PairingCode, Registry, RegistryError, PAIRING_CODE_LEN};
 use crate::silence::{SilenceTracker, DEFAULT_SILENCE_THRESHOLD_SECONDS};
 use axum::body::to_bytes;
@@ -53,7 +54,7 @@ use cf_core::request_auth::{body_sha256, AuthStatement, REQUEST_NONCE_LEN};
 use cf_core::timeanchor::{sign_beacon, TimeBeacon};
 use cf_core::{
     Device, DeviceId, DeviceRole, Ed25519PublicKey, FeedKind, HouseholdId, NotificationEvent,
-    Platform, RegisterRequest, RegisterResponse, SchemaVersion, Signature, TrustAnchor,
+    Platform, RegisterRequest, RegisterResponse, RequestId, SchemaVersion, Signature, TrustAnchor,
 };
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,7 @@ struct Shared {
     guard: ReplayGuard,
     silence: SilenceTracker,
     log: EventLog,
+    mailbox: MailboxStore,
     pending_events: std::collections::VecDeque<NotificationEvent>,
 }
 
@@ -114,6 +116,7 @@ impl AppState {
                 guard: ReplayGuard::new(DEFAULT_MAX_SKEW_SECONDS),
                 silence: SilenceTracker::new(DEFAULT_SILENCE_THRESHOLD_SECONDS),
                 log: EventLog::new(),
+                mailbox: MailboxStore::new(),
                 pending_events: std::collections::VecDeque::new(),
             })),
             rng: SystemRandom::new(),
@@ -169,6 +172,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/heartbeat", post(heartbeat))
         .route("/v1/households/:household/events", post(push_event))
         .route("/v1/households/:household/log/:device", get(get_device_log))
+        .route("/v1/households/:household/messages", post(send_message))
+        .route("/v1/households/:household/mailbox", get(fetch_mailbox))
         .with_state(state)
 }
 
@@ -288,6 +293,19 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+pub(crate) fn hex_decode_any(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.is_ascii() {
+        return None;
+    }
+    s.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let pair = std::str::from_utf8(chunk).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
+        .collect()
 }
 
 pub(crate) fn hex_decode<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -539,6 +557,213 @@ async fn get_device_log(
         .into_response(),
         None => error_response(StatusCode::NOT_FOUND, "no events for this device"),
     }
+}
+
+/// The approval-transport wire encoding (relay-approvals-transport) —
+/// the encoding cf-core deliberately left undefined so this ticket could
+/// own it. `SealedRequest.sealed` is opaque ciphertext hex; `Verdict`
+/// carries every `ApprovalStatement` field plus the signature, so the
+/// receiving device reconstructs the exact signed statement and verifies
+/// it at the point of consequence (`weakening::apply_approval`) — the
+/// relay stores and returns these fields without interpretation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageBody {
+    SealedRequest {
+        request: RequestId,
+        /// Hex of cf-core's `salted_request_hash` — the rate-limit key;
+        /// reveals nothing without the household salt.
+        request_hash: String,
+        /// Hex of the `SealedPayload` ciphertext, sealed to the partner.
+        sealed: String,
+    },
+    Verdict {
+        household: HouseholdId,
+        request: RequestId,
+        /// `ApprovalStatement::action`: "approve" or "veto".
+        verdict: String,
+        target: String,
+        not_before: u64,
+        not_after: u64,
+        /// Hex of the statement's 24-byte nonce (`approval::NONCE_LEN`).
+        nonce: String,
+        /// Hex Ed25519 signature over the statement's canonical bytes.
+        signature: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageRequest {
+    pub version: SchemaVersion,
+    pub to: DeviceId,
+    pub body: MessageBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendMessageResponse {
+    pub version: SchemaVersion,
+    pub mailbox_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxMessage {
+    pub version: SchemaVersion,
+    pub mailbox_seq: u64,
+    pub from: DeviceId,
+    pub body: MessageBody,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxResponse {
+    pub version: SchemaVersion,
+    pub messages: Vec<MailboxMessage>,
+}
+
+/// Signed message send: sender and recipient must both be members of the
+/// household in the path. Sealed-request bodies are rate-limited by
+/// their salted request hash; verdict bodies never are.
+async fn send_message(
+    State(state): State<AppState>,
+    Path(household_hex): Path<String>,
+    request: Request,
+) -> Response {
+    let Ok(household_id) = HouseholdId::from_hex(&household_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "household not found");
+    };
+    let (parts, body) = request.into_parts();
+    let Ok(body_bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    let sender = match authenticate(
+        &mut shared,
+        &parts.headers,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &body_bytes,
+        now,
+    ) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    if !shared.registry.is_member(&household_id, &sender) {
+        return error_response(StatusCode::FORBIDDEN, "not a member of this household");
+    }
+    let Ok(send) = serde_json::from_slice::<SendMessageRequest>(&body_bytes) else {
+        return error_response(StatusCode::BAD_REQUEST, "body is not a message");
+    };
+    if send.version.check().is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "unsupported schema version");
+    }
+    if !shared.registry.is_member(&household_id, &send.to) {
+        return error_response(StatusCode::BAD_REQUEST, "recipient is not a member");
+    }
+    let request_hash = match &send.body {
+        MessageBody::SealedRequest {
+            request_hash,
+            sealed,
+            ..
+        } => {
+            // Validate shape early; the stored bytes stay exactly as sent.
+            if hex_decode_any(sealed).is_none() {
+                return error_response(StatusCode::BAD_REQUEST, "sealed payload is not hex");
+            }
+            match hex_decode::<32>(request_hash) {
+                Some(hash) => Some(hash),
+                None => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "request_hash is not 32 hex bytes",
+                    )
+                }
+            }
+        }
+        MessageBody::Verdict { .. } => None,
+    };
+    let body_json = match serde_json::to_string(&send.body) {
+        Ok(json) => json,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "unserializable body"),
+    };
+    match shared
+        .mailbox
+        .send(household_id, send.to, sender, body_json, request_hash, now)
+    {
+        Ok(mailbox_seq) => (
+            StatusCode::CREATED,
+            Json(SendMessageResponse {
+                version: SchemaVersion::CURRENT,
+                mailbox_seq,
+            }),
+        )
+            .into_response(),
+        Err(MailboxError::RateLimited { retry_after }) => error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("rate limited until {retry_after}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MailboxQuery {
+    /// The recipient's persisted floor; only newer messages return.
+    after: Option<u64>,
+}
+
+/// Signed mailbox fetch. The path names no device: the authenticated
+/// device *is* the mailbox — reading someone else's is unrepresentable.
+async fn fetch_mailbox(
+    State(state): State<AppState>,
+    Path(household_hex): Path<String>,
+    Query(query): Query<MailboxQuery>,
+    request: Request,
+) -> Response {
+    let Ok(household_id) = HouseholdId::from_hex(&household_hex) else {
+        return error_response(StatusCode::NOT_FOUND, "household not found");
+    };
+    let (parts, body) = request.into_parts();
+    let Ok(body_bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+    };
+    let now = unix_now();
+    let mut shared = state.inner.lock().expect("registry lock poisoned");
+    let recipient = match authenticate(
+        &mut shared,
+        &parts.headers,
+        parts.method.as_str(),
+        parts.uri.path(),
+        &body_bytes,
+        now,
+    ) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    if !shared.registry.is_member(&household_id, &recipient) {
+        return error_response(StatusCode::FORBIDDEN, "not a member of this household");
+    }
+    let messages = shared
+        .mailbox
+        .fetch(&household_id, &recipient, query.after.unwrap_or(0))
+        .into_iter()
+        .filter_map(|stored| {
+            let body: MessageBody = serde_json::from_str(&stored.body_json).ok()?;
+            Some(MailboxMessage {
+                version: SchemaVersion::CURRENT,
+                mailbox_seq: stored.mailbox_seq,
+                from: stored.from,
+                body,
+            })
+        })
+        .collect();
+    Json(MailboxResponse {
+        version: SchemaVersion::CURRENT,
+        messages,
+    })
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -967,6 +1192,347 @@ mod tests {
         let (status, body) =
             send_signed_empty_post(&router, &path, &founder_id_hex, &founder_sk, 7).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "replay accepted: {body}");
+    }
+
+    // --- approvals transport (relay-approvals-transport) -------------------
+
+    /// Pairs a partner device (with a seal key) into the founded
+    /// household, returning its id hex and signing key.
+    async fn pair_partner(
+        router: &Router,
+        household_hex: &str,
+        founder_id_hex: &str,
+        seal_pk: cf_core::X25519PublicKey,
+        nonce_byte: u8,
+    ) -> (String, SigningKey) {
+        let (founder_sk, _) = founder_keys();
+        let path = format!("/v1/households/{household_hex}/pairing-codes");
+        let (_, body) =
+            send_signed_empty_post(router, &path, founder_id_hex, &founder_sk, nonce_byte).await;
+        let code = body["code"].as_str().unwrap().to_string();
+
+        let partner_sk = SigningKey::from_bytes(&[0x42; 32]);
+        let partner_vk = Ed25519PublicKey(partner_sk.verifying_key().to_bytes());
+        let (status, body) = send_json(
+            router,
+            "POST",
+            "/v1/pair",
+            serde_json::json!({
+                "version": 1,
+                "pairing_code": code,
+                "platform": "ios",
+                "role": { "role": "partner", "seal_key": seal_pk.to_hex() },
+                "identity_key": partner_vk.to_hex(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "partner pair failed: {body}");
+        (
+            body["device"]["id"].as_str().unwrap().to_string(),
+            partner_sk,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_sealed_request_routes_unchanged_and_only_the_partner_opens_it() {
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, _) = founder_keys();
+
+        let partner_scalar = crypto_box::SecretKey::from([0x77u8; 32]);
+        let partner_seal_pk = cf_core::X25519PublicKey(*partner_scalar.public_key().as_bytes());
+        let (partner_id_hex, partner_sk) = pair_partner(
+            &router,
+            &household_hex,
+            &founder_id_hex,
+            partner_seal_pk,
+            41,
+        )
+        .await;
+
+        // The monitored device seals {domain, reason, salt} to the partner
+        // and sends it with the salted hash as the rate-limit key.
+        let plaintext = br#"{"domain":"example.com","reason":"homework","salt":"s"}"#;
+        let sealed = cf_core::sealing::seal(&partner_seal_pk, plaintext).unwrap();
+        let sealed_hex = hex_encode(&sealed.0);
+        let request_hash = cf_core::sealing::salted_request_hash(b"household-salt", "example.com");
+
+        let send_body = serde_json::json!({
+            "version": 1,
+            "to": partner_id_hex,
+            "body": {
+                "kind": "sealed_request",
+                "request": RequestId([8u8; 16]).to_hex(),
+                "request_hash": hex_encode(&request_hash),
+                "sealed": sealed_hex,
+            },
+        });
+        let messages_path = format!("/v1/households/{household_hex}/messages");
+        let (status, body) = send_signed_request(
+            &router,
+            "POST",
+            &messages_path,
+            &founder_id_hex,
+            &founder_sk,
+            42,
+            send_body.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "send failed: {body}");
+
+        // An identical-hash resend inside the window: rate limited.
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &messages_path,
+            &founder_id_hex,
+            &founder_sk,
+            43,
+            send_body.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+        // The partner fetches its mailbox (signed; the mailbox is the
+        // authenticated device's own, structurally).
+        let mailbox_path = format!("/v1/households/{household_hex}/mailbox?after=0");
+        let (status, body) = send_signed_request(
+            &router,
+            "GET",
+            &mailbox_path,
+            &partner_id_hex,
+            &partner_sk,
+            44,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "fetch failed: {body}");
+        let mailbox: MailboxResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(mailbox.messages.len(), 1);
+        let MessageBody::SealedRequest { sealed, .. } = &mailbox.messages[0].body else {
+            panic!("expected a sealed request");
+        };
+
+        // DoD row 1: ciphertext routed unchanged, byte for byte.
+        assert_eq!(sealed, &sealed_hex);
+
+        // DoD row 2: only the partner scalar opens it. The relay holds no
+        // X25519 secret anywhere in its state (cf-core has no private-key
+        // type to even store one); any other scalar — standing in for
+        // everything the relay could possibly try — fails.
+        let routed = cf_core::SealedPayload(hex_decode_any(sealed).unwrap());
+        let opened = cf_core::sealing::open(&partner_scalar.to_bytes(), &routed).unwrap();
+        assert_eq!(opened, plaintext);
+        let not_the_partner = crypto_box::SecretKey::from([0x99u8; 32]);
+        assert!(cf_core::sealing::open(&not_the_partner.to_bytes(), &routed).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_verdict_routes_and_applies_on_the_target_device() {
+        use cf_core::approval::{ApprovalStatement, NONCE_LEN};
+        use cf_core::timeanchor::{FloorStore, TimeAnchor};
+        use cf_core::weakening::{
+            canonical_target, EffectiveVia, FilterChange, Transition, WeakeningRequest,
+            APPROVE_VERDICT,
+        };
+
+        #[derive(Default)]
+        struct MemFloor(Option<(u64, u64)>);
+        impl FloorStore for MemFloor {
+            fn load_floor(&self) -> Option<(u64, u64)> {
+                self.0
+            }
+            fn save_floor(&mut self, utc: u64, seq: u64) {
+                self.0 = Some((utc, seq));
+            }
+        }
+
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, _) = founder_keys();
+        let partner_scalar = crypto_box::SecretKey::from([0x77u8; 32]);
+        let partner_seal_pk = cf_core::X25519PublicKey(*partner_scalar.public_key().as_bytes());
+        let (partner_id_hex, partner_relay_sk) = pair_partner(
+            &router,
+            &household_hex,
+            &founder_id_hex,
+            partner_seal_pk,
+            51,
+        )
+        .await;
+
+        // The monitored device's pending weakening request (client-side).
+        let anchor = signed_anchor();
+        let now = unix_now();
+        let time = TimeAnchor::new(MemFloor(Some((now, 1))));
+        let request_id = RequestId([8u8; 16]);
+        let mut weakening = WeakeningRequest::new(
+            &anchor,
+            request_id,
+            FilterChange::DisableSocialBlocking,
+            Some(3600),
+            &time,
+            now,
+        )
+        .unwrap();
+
+        // The partner signs the approval with the ANCHOR's approval key
+        // (seed 0x42 — the same key the founded household's anchor names)
+        // and routes it through the relay.
+        let approval_sk = SigningKey::from_bytes(&[0x42; 32]);
+        let target = canonical_target(&FilterChange::DisableSocialBlocking, Some(3600));
+        let statement = ApprovalStatement::new(
+            anchor.household_id,
+            request_id,
+            APPROVE_VERDICT,
+            target.clone(),
+            now,
+            now + 7200,
+            [9u8; NONCE_LEN],
+        )
+        .unwrap();
+        let signature = cf_core::approval::sign(&statement, &approval_sk).unwrap();
+
+        let send_body = serde_json::json!({
+            "version": 1,
+            "to": founder_id_hex,
+            "body": {
+                "kind": "verdict",
+                "household": statement.household_id.to_hex(),
+                "request": statement.request_id.to_hex(),
+                "verdict": statement.action,
+                "target": statement.target,
+                "not_before": statement.not_before,
+                "not_after": statement.not_after,
+                "nonce": hex_encode(&statement.nonce),
+                "signature": signature.to_hex(),
+            },
+        });
+        let messages_path = format!("/v1/households/{household_hex}/messages");
+        let (status, body) = send_signed_request(
+            &router,
+            "POST",
+            &messages_path,
+            &partner_id_hex,
+            &partner_relay_sk,
+            52,
+            send_body.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "verdict send failed: {body}");
+
+        // DoD row 3: the target device fetches the verdict, reconstructs
+        // the exact signed statement, and the weakening machine verifies
+        // and applies it at the point of consequence.
+        let mailbox_path = format!("/v1/households/{household_hex}/mailbox?after=0");
+        let (status, body) = send_signed_request(
+            &router,
+            "GET",
+            &mailbox_path,
+            &founder_id_hex,
+            &founder_sk,
+            53,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mailbox: MailboxResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(mailbox.messages.len(), 1);
+        let MessageBody::Verdict {
+            household,
+            request,
+            verdict,
+            target,
+            not_before,
+            not_after,
+            nonce,
+            signature,
+        } = &mailbox.messages[0].body
+        else {
+            panic!("expected a verdict");
+        };
+
+        let reconstructed = ApprovalStatement::new(
+            *household,
+            *request,
+            verdict.clone(),
+            target.clone(),
+            *not_before,
+            *not_after,
+            hex_decode::<NONCE_LEN>(nonce).unwrap(),
+        )
+        .unwrap();
+        let sig = Signature::from_hex(signature).unwrap();
+        let transition = weakening
+            .apply_approval(&anchor, &reconstructed, &sig, &time, now + 60)
+            .unwrap();
+        assert!(matches!(
+            transition,
+            Transition::BecameEffective {
+                via: EffectiveVia::PartnerApproval,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_mailbox_message_still_surfaces_in_the_chain() {
+        use cf_core::hashchain::GENESIS_HASH;
+
+        // The relay "drops" a mailbox message by simply never having it —
+        // what it CANNOT drop is the sender's chained event recording that
+        // the request existed: the mailbox and the log are independent
+        // stores, and rewriting the chain breaks verification (relay-log's
+        // fork/gap tests). The partner's audit path sees the event; the
+        // missing mailbox delivery is the visible discrepancy.
+        let (router, household_hex, founder_id_hex) = founded_router().await;
+        let (founder_sk, _) = founder_keys();
+        let founder_id = DeviceId::from_hex(&founder_id_hex).unwrap();
+
+        let event = signed_chain_event(founder_id, &founder_sk, 1, GENESIS_HASH, "weakening:req8");
+        let (status, _) = send_signed_request(
+            &router,
+            "POST",
+            &format!("/v1/households/{household_hex}/events"),
+            &founder_id_hex,
+            &founder_sk,
+            61,
+            serde_json::to_vec(&event).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // No mailbox message was ever delivered…
+        let partner_scalar = crypto_box::SecretKey::from([0x77u8; 32]);
+        let seal_pk = cf_core::X25519PublicKey(*partner_scalar.public_key().as_bytes());
+        let (partner_id_hex, partner_sk) =
+            pair_partner(&router, &household_hex, &founder_id_hex, seal_pk, 62).await;
+        let (_, body) = send_signed_request(
+            &router,
+            "GET",
+            &format!("/v1/households/{household_hex}/mailbox?after=0"),
+            &partner_id_hex,
+            &partner_sk,
+            63,
+            Vec::new(),
+        )
+        .await;
+        let mailbox: MailboxResponse = serde_json::from_value(body).unwrap();
+        assert!(mailbox.messages.is_empty());
+
+        // …but the chain still attests the event.
+        let (status, body) = send_signed_request(
+            &router,
+            "GET",
+            &format!("/v1/households/{household_hex}/log/{founder_id_hex}"),
+            &partner_id_hex,
+            &partner_sk,
+            64,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let view: DeviceLogResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(view.events.len(), 1);
+        assert_eq!(view.events[0].payload, b"weakening:req8");
     }
 
     // --- the event log (relay-log) ----------------------------------------

@@ -260,6 +260,7 @@ dependencies = [
  "axum",
  "cf-core",
  "clap",
+ "crypto_box",
  "ed25519-dalek",
  "hyper-util",
  "rcgen",
