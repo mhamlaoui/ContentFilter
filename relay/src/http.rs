@@ -177,6 +177,15 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// What devices sign as the statement's `path`: the path **and query**
+/// exactly as received. Including the query keeps parameters like the
+/// mailbox `after` floor inside the signature — CI caught the asymmetric
+/// version (sign-with-query, verify-without) as an instant 401.
+fn signed_path(uri: &axum::http::Uri) -> &str {
+    uri.path_and_query()
+        .map_or_else(|| uri.path(), |pq| pq.as_str())
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -418,7 +427,7 @@ async fn heartbeat(State(state): State<AppState>, request: Request) -> Response 
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
@@ -482,7 +491,7 @@ async fn push_event(
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
@@ -537,7 +546,7 @@ async fn get_device_log(
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
@@ -644,7 +653,7 @@ async fn send_message(
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
@@ -735,7 +744,7 @@ async fn fetch_mailbox(
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
@@ -859,7 +868,7 @@ async fn issue_pairing_code(
         &mut shared,
         &parts.headers,
         parts.method.as_str(),
-        parts.uri.path(),
+        signed_path(&parts.uri),
         &body_bytes,
         now,
     ) {
