@@ -20,6 +20,8 @@
 //! so the plain `serve_connection` path sidesteps the issue entirely.
 
 pub mod auth;
+pub mod http;
+pub mod registry;
 
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -79,7 +81,7 @@ async fn health() -> axum::Json<HealthResponse> {
 }
 
 pub fn app() -> Router {
-    Router::new().route("/healthz", axum::routing::get(health))
+    http::router(http::AppState::new()).route("/healthz", axum::routing::get(health))
 }
 
 /// How long a graceful shutdown waits for in-flight connections to finish

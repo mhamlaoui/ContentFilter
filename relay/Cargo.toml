@@ -29,6 +29,9 @@ hyper-util = { version = "0.1.20", features = ["server-auto", "server-graceful",
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
+# Pairing codes and relay-minted ids need a CSPRNG; ring is already the
+# rustls crypto backend in this graph, so this adds no new compiled code.
+ring = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
@@ -43,3 +46,5 @@ rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tempfile = "3"
 serde_json = "1"
+# Router::oneshot for endpoint tests without a TLS listener.
+tower = { version = "0.4", features = ["util"] }

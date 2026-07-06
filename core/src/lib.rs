@@ -37,7 +37,7 @@ pub use device::{Device, DeviceRole, Platform};
 pub use event::{EventKind, NotificationEvent};
 pub use filter_state::FilterState;
 pub use hashchain::{ChainError, ChainedEvent, DeviceKeyResolver};
-pub use household::{Household, Tier, TrustAnchor};
+pub use household::{sign_anchor, AnchorError, Household, Tier, TrustAnchor};
 pub use ids::{DeviceId, HouseholdId, RequestId};
 pub use keys::{Ed25519PublicKey, Signature, X25519PublicKey};
 pub use relay_client::{

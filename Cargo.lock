@@ -264,6 +264,7 @@ dependencies = [
  "hyper-util",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -272,6 +273,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
