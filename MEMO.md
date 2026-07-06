@@ -255,6 +255,37 @@ truth.
     canonical anchor encoding exists yet; that's svc-config-anchor's job.
   - `ChainedEvent` gained serde (hex fields; canonical signed encoding
     untouched); reserialized chains still verify (test).
+- Post-close redteam of #26 (`7a5a497`, green run 28757162626, first
+  try): split `ClientState` (serde) from `RelayClient` (pinned release
+  key, no serde impls) so a tampered state file structurally cannot swap
+  feed trust; loud asserts on the truncating length casts in both signed
+  canonical encodings (feed + hashchain — wrapped length prefixes are a
+  canonicalization-ambiguity forgery vector); `FeedKind` tag bytes pinned
+  by landmine.
+
+## 2026-07-06 — relay-auth
+
+- `relay-auth` (#29, closed): `core/src/request_auth.rs` (signed bytes,
+  shared by every platform) + `relay/src/auth.rs` (stateful verdicts:
+  registry lookup via the existing `DeviceKeyResolver` trait, timestamp
+  window, per-device nonce store). Commits `8e4b978`, `6179400` (KAT
+  pin); green run
+  https://github.com/mhamlaoui/ContentFilter/actions/runs/28769161796 —
+  two round-trips, no real bugs (first push failed only on the deliberate
+  `PENDING_CI_RUN` KAT; tuple assert delivered both values in one run).
+  - `AuthStatement` binds device_id + method/path + sha256(body) + ts +
+    nonce; the relay compares its own routing context and recomputed body
+    hash against the signed claims (endpoint-replay and body-swap both
+    have negative tests). No `household_id` inside — the registry stays
+    the single source of truth for membership.
+  - Eviction invariant: a nonce is forgotten exactly when its signed ts
+    goes stale, so a replay self-rejects on staleness from that moment —
+    the window never reopens (boundary pinned by test). Future-dated ts
+    beyond skew rejected (no banking one nonce for a far-future replay).
+  - Check order (signature before nonce write) means unauthenticated
+    traffic can't poison or grow the replay cache.
+  - Axum middleware deliberately deferred to relay-registry-pairing
+    (#30), which owns the wire framing and the first mutating endpoints.
 
 ---
 
@@ -271,12 +302,13 @@ truth.
 ## Next unblocked tickets (per BACKLOG.md wave order)
 
 - ~~`core-weakening`~~ — done (#25 closed, `2a2c633`)
-- ~~`core-relay-client`~~ — done (#26 closed, `a6d3a8e`..`7eb0d5a`)
+- ~~`core-relay-client`~~ — done (#26 closed, `a6d3a8e`..`7eb0d5a`, hardened `7a5a497`)
+- ~~`relay-auth`~~ — done (#29 closed, `8e4b978` + `6179400`)
 - `core-uniffi-scaffold` (#27; blocked by core-weakening + core-relay-client —
-  both now done). Closes out the e-core epic.
-- `relay-auth` (#29; blocked by relay-bootstrap (closed) + core-crypto-approvals
-  (#21, open only for the fuzzing follow-up — functionally done, same basis on
-  which core-weakening proceeded)).
+  both now done). Closes out the e-core epic; needs new CI surface
+  (UniFFI codegen + Swift/Kotlin build jobs) — human input requested.
+- `relay-registry-pairing` (#30; blocked by relay-auth — now done). Continues
+  the accountability spine; first real mutating endpoints + auth wiring.
 - `svc-skeleton` (#39; e-service epic; blocked by core-models only — done). Different
   risk profile from everything above: involves actually installing/starting/
   stopping a Windows service via SCM, not just application-level Rust.
