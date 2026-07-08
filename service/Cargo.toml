@@ -5,8 +5,33 @@ edition.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+name = "cf_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cf-service"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
 cf-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+# The de-facto SCM host crate (Mullvad). No build scripts in its tree, so
+# local `cargo build -p cf-service` keeps working under Smart App Control.
+windows-service = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
+# Assert the JSON log formatter actually emits valid JSON lines. Already in
+# the graph via tracing-subscriber's `json` feature, so this adds no new
+# compiled code — same crate cf-relay uses.
+serde_json = "1"
