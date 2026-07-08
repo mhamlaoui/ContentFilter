@@ -6,20 +6,26 @@
 //! Several ticket DoD lines reference a design doc that does not exist in
 //! this repo (see `CLAUDE.md`; same situation as issues #16/#17/#19/#20/#21).
 //! Rather than invent a doc to match, this module *defines* the ACL policy in
-//! code, and the corresponding DoD box is left unchecked with a note on the
-//! issue. The policy is:
+//! code — matching the shape the issue's Deliverables spell out ("SYSTEM
+//! full, Admin read, Users none") — and leaves the "match section 8.5" DoD
+//! box unchecked with a note on the issue. The policy is:
 //!
 //! > The service's `data_dir` (logs today, protected state tomorrow) is
-//! > readable and writable by **`SYSTEM`** and the **`Administrators`** group
-//! > only. Inheritance from the parent is removed, so nothing an
-//! > unprivileged user can influence upstream leaks in. Standard users
-//! > (`Users`, `Authenticated Users`, `Everyone`) get *no* access.
+//! > **writable only by `SYSTEM`** (the account the service runs as). The
+//! > **`Administrators`** group gets **read-only** access — enough to audit
+//! > the accountability record, not to mutate it. Inheritance from the parent
+//! > is removed, so nothing an unprivileged user can influence upstream leaks
+//! > in. Standard users (`Users`, `Authenticated Users`, `Everyone`) get *no*
+//! > access.
 //!
 //! Rationale for the accountability model: the monitored user is expected to
 //! be a standard (non-admin) account, and the service runs as `LocalSystem`.
-//! Logs and future state (the accountability record) must not be readable or
-//! tamperable by that standard user, or the anti-tamper guarantees the rest
-//! of the system builds on would be undermined at the filesystem layer.
+//! The accountability record (logs, future state) must not be readable or
+//! tamperable by that standard user. Administrators are read-only rather than
+//! full on purpose: even an admin — which a monitored user might be — should
+//! not be able to *quietly* rewrite or delete the record. Only `SYSTEM`
+//! writes; changing that requires an admin to first take ownership, which is
+//! a deliberate, non-silent act, not a casual `del`.
 //!
 //! # Why `icacls` and not the Win32 security APIs
 //!
@@ -48,19 +54,26 @@ const SID_LOCAL_SYSTEM: &str = "*S-1-5-18";
 const SID_ADMINISTRATORS: &str = "*S-1-5-32-544";
 
 /// `(OI)(CI)F` = object-inherit + container-inherit + Full control, so the
-/// grant applies to the directory and everything created under it.
+/// grant applies to the directory and everything created under it. SYSTEM
+/// (the service account) gets this so it can write logs and state.
 #[cfg(windows)]
 const FULL_INHERITED: &str = ":(OI)(CI)F";
 
-/// Locks `path` down to `SYSTEM` + `Administrators` only, removing inherited
-/// ACEs. Idempotent: safe to run at install time and again on every service
-/// start.
+/// `(OI)(CI)RX` = object-inherit + container-inherit + Read & eXecute
+/// (read/list/traverse), applied to the directory and its children.
+/// Administrators get this — audit read, no write/delete.
+#[cfg(windows)]
+const READ_INHERITED: &str = ":(OI)(CI)RX";
+
+/// Locks `path` down to `SYSTEM` (full) + `Administrators` (read-only),
+/// removing inherited ACEs. Idempotent: safe to run at install time and again
+/// on every service start.
 #[cfg(windows)]
 pub fn harden_dir(path: &Path) -> io::Result<()> {
     use std::process::Command;
 
     let sys_grant = format!("{SID_LOCAL_SYSTEM}{FULL_INHERITED}");
-    let admin_grant = format!("{SID_ADMINISTRATORS}{FULL_INHERITED}");
+    let admin_grant = format!("{SID_ADMINISTRATORS}{READ_INHERITED}");
 
     // /inheritance:r  — strip inherited ACEs (protected DACL).
     // /grant:r <sid:perm>… — replace (not add to) the grant for each SID.
@@ -110,10 +123,28 @@ mod tests {
 
         // The two allowed principals are present. (icacls resolves SIDs to
         // names; on the English CI runner these are the expected strings.)
-        assert!(text.contains("SYSTEM"), "SYSTEM ACE missing:\n{text}");
+        // icacls prints the first ACE on the same line as the path, the rest
+        // on their own indented lines.
+        let system_line = text
+            .lines()
+            .find(|l| l.contains("SYSTEM"))
+            .unwrap_or_else(|| panic!("SYSTEM ACE missing:\n{text}"));
+        let admin_line = text
+            .lines()
+            .find(|l| l.contains("Administrators"))
+            .unwrap_or_else(|| panic!("Administrators ACE missing:\n{text}"));
+
+        // SYSTEM writes (Full); Administrators only audit (read, never Full):
+        // the deliverable's "SYSTEM full, Admin read". A regression that grants
+        // admins Full — letting a monitored admin silently rewrite the record —
+        // trips this landmine.
         assert!(
-            text.contains("Administrators"),
-            "Administrators ACE missing:\n{text}"
+            system_line.contains("(F)"),
+            "SYSTEM must have Full control:\n{text}"
+        );
+        assert!(
+            !admin_line.contains("(F)"),
+            "Administrators must be read-only, not Full:\n{text}"
         );
 
         // No broad principals. We check specific ACE forms rather than bare
