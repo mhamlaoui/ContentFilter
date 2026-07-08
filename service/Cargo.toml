@@ -20,6 +20,11 @@ workspace = true
 cf-core = { path = "../core" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+# Persist/read the pinned TrustAnchor (svc-config-anchor). Promoted from
+# dev-only to a real dep the commit it gained runtime use, per the relay's
+# "move the dep the same commit" rule. Already in the graph via
+# tracing-subscriber's `json` feature, so no new compiled code.
+serde_json = "1"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
@@ -31,7 +36,11 @@ windows-service = "0.7"
 
 [dev-dependencies]
 tempfile = "3"
-# Assert the JSON log formatter actually emits valid JSON lines. Already in
-# the graph via tracing-subscriber's `json` feature, so this adds no new
-# compiled code — same crate cf-relay uses.
+# Build signed TrustAnchors in the anchor tests (pin/rotation/tamper cases);
+# same dalek cf-core signs anchors with.
+ed25519-dalek = "2"
+# The SCM integration test is a separate crate, so it can't see cf-service's
+# regular deps — it needs cf-core (to build a TrustAnchor) and serde_json (to
+# write it) declared here too.
+cf-core = { path = "../core" }
 serde_json = "1"

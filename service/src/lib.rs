@@ -23,6 +23,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 pub mod acl;
+pub mod anchor;
 pub mod config;
 pub mod logging;
 
@@ -70,6 +71,26 @@ pub fn run_service_body(config: &ServiceConfig, stop: Receiver<()>) -> io::Resul
         service = SERVICE_NAME,
         "cf-service started"
     );
+
+    // Security-critical enforcement params come from the pinned, signed
+    // anchor — never from local config (svc-config-anchor). Full validation
+    // (rotation, tamper detection, event emission) is `AnchorStore::reconcile`
+    // and lands with enrollment (it needs the device id for its events); the
+    // skeleton just confirms the pinned params it will enforce.
+    let anchor_store = anchor::AnchorStore::new(&config.data_dir);
+    if anchor_store.is_pinned() {
+        match anchor_store.load_trusted() {
+            Ok(a) => tracing::info!(
+                tier = ?a.tier,
+                cooling_off_seconds = a.cooling_off_seconds,
+                household = %a.household_id.to_hex(),
+                "enforcing pinned trust anchor"
+            ),
+            Err(e) => tracing::error!(error = %e, "failed to load pinned trust anchor"),
+        }
+    } else {
+        tracing::warn!("no trust anchor pinned; install with --anchor to set enforcement params");
+    }
 
     loop {
         match stop.recv_timeout(HEARTBEAT_INTERVAL) {

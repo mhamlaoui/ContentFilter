@@ -293,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "cf-core",
  "clap",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "tempfile",

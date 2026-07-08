@@ -65,9 +65,15 @@ const FULL_INHERITED: &str = ":(OI)(CI)F";
 #[cfg(windows)]
 const READ_INHERITED: &str = ":(OI)(CI)RX";
 
-/// Locks `path` down to `SYSTEM` (full) + `Administrators` (read-only),
-/// removing inherited ACEs. Idempotent: safe to run at install time and again
-/// on every service start.
+/// Locks `path` **and its existing contents** down to `SYSTEM` (full) +
+/// `Administrators` (read-only), removing inherited ACEs. Idempotent: safe to
+/// run at install time and again on every service start.
+///
+/// The recursive `/T` matters at install: files written into `data_dir`
+/// before hardening (e.g. the pinned anchor, svc-config-anchor) would
+/// otherwise keep the broad ACL they inherited at creation — changing only
+/// the directory's own DACL does not rewrite existing children's. New files
+/// created *after* hardening inherit the locked ACL via `(OI)(CI)`.
 #[cfg(windows)]
 pub fn harden_dir(path: &Path) -> io::Result<()> {
     use std::process::Command;
@@ -77,14 +83,16 @@ pub fn harden_dir(path: &Path) -> io::Result<()> {
 
     // /inheritance:r  — strip inherited ACEs (protected DACL).
     // /grant:r <sid:perm>… — replace (not add to) the grant for each SID.
-    // Both applied in one call, so the directory is never momentarily
-    // ACL-less between removing inheritance and adding the explicit grants.
+    // /T              — apply recursively to existing children too.
+    // The grants are applied in the same call, so the directory is never
+    // momentarily ACL-less between removing inheritance and adding them.
     let output = Command::new("icacls")
         .arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg(&sys_grant)
         .arg(&admin_grant)
+        .arg("/T")
         .output()?;
 
     if !output.status.success() {

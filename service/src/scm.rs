@@ -46,6 +46,7 @@ pub enum ServiceError {
     Winapi(windows_service::Error),
     Io(io::Error),
     Config(crate::config::ConfigError),
+    Anchor(crate::anchor::AnchorStoreError),
     /// A state transition did not complete within [`STATE_CHANGE_TIMEOUT`].
     Timeout(&'static str),
 }
@@ -56,6 +57,7 @@ impl std::fmt::Display for ServiceError {
             ServiceError::Winapi(e) => write!(f, "SCM error: {e}"),
             ServiceError::Io(e) => write!(f, "IO error: {e}"),
             ServiceError::Config(e) => write!(f, "config error: {e}"),
+            ServiceError::Anchor(e) => write!(f, "anchor error: {e}"),
             ServiceError::Timeout(what) => write!(f, "timed out: {what}"),
         }
     }
@@ -126,8 +128,23 @@ pub fn install(
     config_path: PathBuf,
     auto_start: bool,
     data_dir: &Path,
+    anchor_path: Option<&Path>,
 ) -> Result<(), ServiceError> {
     std::fs::create_dir_all(data_dir).map_err(ServiceError::Io)?;
+
+    // Pin the anchor BEFORE hardening (DoD: "anchor pinned at install"). The
+    // installer runs as admin; after hardening, admins are read-only on the
+    // dir, so the pin files must be written first and then locked by the
+    // recursive `harden_dir` below (which is why it uses `/T`).
+    if let Some(anchor_path) = anchor_path {
+        let text = std::fs::read_to_string(anchor_path).map_err(ServiceError::Io)?;
+        let anchor: cf_core::TrustAnchor = serde_json::from_str(&text)
+            .map_err(|e| ServiceError::Anchor(crate::anchor::AnchorStoreError::Parse(e)))?;
+        crate::anchor::AnchorStore::new(data_dir)
+            .pin(&anchor)
+            .map_err(ServiceError::Anchor)?;
+    }
+
     crate::acl::harden_dir(data_dir).map_err(ServiceError::Io)?;
 
     let start_type = if auto_start {

@@ -20,6 +20,33 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use cf_core::household::sign_anchor;
+use cf_core::{
+    Ed25519PublicKey, HouseholdId, SchemaVersion, Signature, Tier, TrustAnchor, X25519PublicKey,
+};
+use ed25519_dalek::SigningKey;
+
+/// Writes a self-signed trust anchor to `dir/anchor_input.json` for the
+/// installer to pin, returning its path.
+fn write_signed_anchor(dir: &Path) -> PathBuf {
+    let sk = SigningKey::from_bytes(&[0x42; 32]);
+    let vk = Ed25519PublicKey(sk.verifying_key().to_bytes());
+    let mut anchor = TrustAnchor {
+        version: SchemaVersion::CURRENT,
+        household_id: HouseholdId([7u8; 16]),
+        seq: 1,
+        partner_approval_key: vk,
+        partner_seal_key: X25519PublicKey([9u8; 32]),
+        cooling_off_seconds: 86_400,
+        tier: Tier::Hardened,
+        signature: Signature([0u8; 64]),
+    };
+    anchor.signature = sign_anchor(&anchor, &sk);
+    let path = dir.join("anchor_input.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&anchor).unwrap()).unwrap();
+    path
+}
+
 /// Deletes the service and removes the scratch dir on the way out, even if an
 /// assertion panics mid-test — a leaked service on the runner would poison
 /// re-runs.
@@ -82,9 +109,25 @@ fn install_start_stop_uninstall_round_trip() {
     .unwrap();
 
     let exe = PathBuf::from(env!("CARGO_BIN_EXE_cf-service"));
+    let anchor_path = write_signed_anchor(&base);
 
     // --- install --------------------------------------------------------
-    cf_service::scm::install(exe, config_path, false, &data_dir).expect("install");
+    cf_service::scm::install(
+        exe,
+        config_path,
+        false,
+        &data_dir,
+        Some(anchor_path.as_path()),
+    )
+    .expect("install");
+
+    // "anchor pinned at install": the pin file exists under the (now
+    // hardened) data dir. Proves pin-before-harden ordering works against
+    // real icacls — after hardening, admins are read-only there.
+    assert!(
+        data_dir.join("anchor.pin").exists(),
+        "the trust anchor should be pinned at install"
+    );
 
     // "runs as LocalSystem": the SCM records the account the service starts
     // under, and `account_name: None` at install resolves to LocalSystem.

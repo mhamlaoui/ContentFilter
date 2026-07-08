@@ -38,6 +38,9 @@ enum Command {
     Install {
         #[arg(long, default_value = "service.toml")]
         config: PathBuf,
+        /// Path to a signed trust anchor (JSON) to pin at install.
+        #[arg(long)]
+        anchor: Option<PathBuf>,
         /// Start automatically at boot instead of on demand.
         #[arg(long)]
         auto_start: bool,
@@ -79,7 +82,11 @@ fn dispatch(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             cf_service::run_console(&cfg)?;
             Ok(())
         }
-        Command::Install { config, auto_start } => install(config, auto_start),
+        Command::Install {
+            config,
+            anchor,
+            auto_start,
+        } => install(config, anchor, auto_start),
         Command::Uninstall => uninstall(),
         Command::Start => start(),
         Command::Stop => stop(),
@@ -104,18 +111,28 @@ fn run_service_entry(config: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[cfg(windows)]
-fn install(config: PathBuf, auto_start: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn install(
+    config: PathBuf,
+    anchor: Option<PathBuf>,
+    auto_start: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = absolutize(config)?;
     let cfg = cf_service::ServiceConfig::load(&config)?;
     let exe = std::env::current_exe()?;
-    cf_service::scm::install(exe, config, auto_start, &cfg.data_dir)?;
+    let anchor = anchor.map(absolutize).transpose()?;
+    cf_service::scm::install(exe, config, auto_start, &cfg.data_dir, anchor.as_deref())?;
     println!(
-        "Installed {} as LocalSystem ({}).",
+        "Installed {} as LocalSystem ({}{}).",
         cf_service::SERVICE_NAME,
         if auto_start {
             "auto-start"
         } else {
             "on-demand"
+        },
+        if anchor.is_some() {
+            ", anchor pinned"
+        } else {
+            ""
         }
     );
     Ok(())
@@ -148,7 +165,11 @@ fn run_service_entry(_config: PathBuf) -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[cfg(not(windows))]
-fn install(_config: PathBuf, _auto_start: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn install(
+    _config: PathBuf,
+    _anchor: Option<PathBuf>,
+    _auto_start: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     Err(windows_only())
 }
 
