@@ -380,6 +380,45 @@ truth.
 
 ---
 
+## 2026-07-08 — svc-skeleton (e-service epic opener)
+
+- `svc-skeleton` (#39, **not closed** — one DoD box honestly unchecked):
+  `cf-service` is now a lib + bin instead of an empty stub. Commits
+  `469b017` (skeleton) + `5fdfaa4` (ACL read-only correction). Both CI
+  targets green first push each:
+  runs/28971114311 and runs/28971457047.
+  - **installs/starts/stops via SCM** (checked): `scm.rs` on
+    `windows-service` 0.7. Installed image runs `cf-service run --config
+    <abs>`; `service_main` registers a control handler and reports
+    StartPending→Running→Stopped. `tests/scm_lifecycle.rs` drives the real
+    built exe (`env!("CARGO_BIN_EXE_cf-service")`) create→Running→stop→
+    delete, guarded by `scm::can_manage()` so it skips (not fails) when
+    unelevated.
+  - **runs as LocalSystem** (checked): `account_name: None` at install;
+    test asserts `query_config().account_name == "LocalSystem"`.
+  - **logs rotate at size limit** (checked): `logging.rs` hand-rolled
+    size-based `RotatingLog` as a tracing `MakeWriter` (tracing-appender
+    is time-only). Property tests: rotate-on-limit, no-byte-loss across
+    generations, drop-past-keep_files, over-limit-single-record landmine,
+    restart-seeds-size; plus an end-to-end tracing→JSON-lines test.
+  - **ACLs match design section 8.5** (UNCHECKED): §8.5 doesn't exist
+    (pattern of #16/#17/#19/#20/#21). Implemented `acl.rs` to the issue's
+    Deliverables shape instead — SYSTEM full, Admin **read-only**
+    (`(OI)(CI)RX`), Users/Everyone none, inheritance stripped — via
+    `icacls` with well-known SIDs. First cut granted Admin Full;
+    corrected in `5fdfaa4` because an admin-level monitored user must not
+    silently rewrite the accountability record. Landmine test parses
+    `icacls` output: SYSTEM `(F)`, Administrators not `(F)`, no broad
+    principals.
+  - CI passed on the **first push both times** (like core-weakening):
+    non-test code build+clippy verified locally on this Windows host
+    (`scm.rs` compiles here), pre-push audit of the CI-only test code,
+    `--locked` checked after adding `serde_json` dev-dep.
+  - Environment note: this session's permission mode initially denied
+    Write/Edit/gh; user re-enabled edits mid-session.
+
+---
+
 ## Open items with partial progress (as of 2026-07-05)
 
 | Issue | Ticket | What's done | What's blocking full closure |
